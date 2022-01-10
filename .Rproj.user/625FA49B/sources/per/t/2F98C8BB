@@ -1,0 +1,27 @@
+{
+    "id": "2F98C8BB",
+    "path": "~/git/macrosheds/macrosheds_support/munge_workflow/src/helpers.R",
+    "project_path": "src/helpers.R",
+    "type": "r_source",
+    "hash": "3986971904",
+    "contents": "",
+    "dirty": false,
+    "created": 1639946838018.0,
+    "source_on_save": false,
+    "relative_order": 2,
+    "properties": {
+        "tempName": "Untitled1",
+        "source_window_id": "",
+        "Source": "Source",
+        "cursorPosition": "2486,20",
+        "scrollLine": "2478"
+    },
+    "folds": "18|50|433|0|\n435|48|449|0|\n451|34|461|0|\n463|31|468|0|\n470|47|491|0|\n493|58|505|0|\n507|53|566|0|\n572|39|658|0|\n660|46|734|0|\n736|36|757|0|\n768|52|1049|0|\n1054|45|1181|0|\n1183|52|1212|0|\n1214|42|1231|0|\n1233|52|1244|0|\n1252|45|1425|0|\n2378|45|2469|0|\n",
+    "lastKnownWriteTime": 1639951225,
+    "encoding": "UTF-8",
+    "collab_server": "",
+    "source_window": "",
+    "last_content_update": 1639951225055,
+    "read_only": false,
+    "read_only_alternatives": []
+}

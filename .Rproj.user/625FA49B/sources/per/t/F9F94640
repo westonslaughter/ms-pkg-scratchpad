@@ -1,0 +1,27 @@
+{
+    "id": "F9F94640",
+    "path": "~/git/macrosheds/macrosheds_support/munge_workflow/src/konza.R",
+    "project_path": "src/konza.R",
+    "type": "r_source",
+    "hash": "1652209562",
+    "contents": "",
+    "dirty": false,
+    "created": 1639949878592.0,
+    "source_on_save": false,
+    "relative_order": 3,
+    "properties": {
+        "tempName": "Untitled1",
+        "source_window_id": "",
+        "Source": "Source",
+        "cursorPosition": "432,29",
+        "scrollLine": "146"
+    },
+    "folds": "151|18|221|0|\n222|18|291|0|\n292|18|361|0|\n362|19|431|0|\n",
+    "lastKnownWriteTime": 1639951382,
+    "encoding": "UTF-8",
+    "collab_server": "",
+    "source_window": "",
+    "last_content_update": 1639951382930,
+    "read_only": false,
+    "read_only_alternatives": []
+}

@@ -1,0 +1,2523 @@
+sm = suppressMessages
+sw = suppressWarnings
+
+ms_read_raw_csv <- function(filepath,
+                            preprocessed_tibble,
+                            datetime_cols,
+                            datetime_tz,
+                            optionalize_nontoken_characters = ':',
+                            site_code_col,
+                            alt_site_code,
+                            data_cols,
+                            data_col_pattern,
+                            alt_datacol_pattern,
+                            is_sensor,
+                            set_to_NA,
+                            var_flagcol_pattern,
+                            alt_varflagcol_pattern,
+                            summary_flagcols,
+                            sampling_type = NULL){
+    
+    #TODO:
+    #add a silent = TRUE option. this would hide all warnings
+    #allow a vector of possible matches for each element of datetime_cols
+    #   (i.e. make it take a list of named vectors)
+    #write more checks for improper specification.
+    #if file to be read is stored in long format, this function will not work!
+    #this could easily be adapted to read other delimited filetypes.
+    #could also add a drop_empty_rows and/or drop_empty_datacols parameter.
+    #   atm those things happen automatically
+    #likewise, a remove_duplicates param could be nice. atm, for duplicated rows,
+    #   the one with the fewest NA values is kept automatically
+    #allow a third option in is_sensor for mixed sensor/nonsensor
+    #   (also change param name). check for comments inside munge kernels
+    #   indicating where this is needed
+    #site_code_col should eventually work like datetime_cols (in case site_code is
+    #   separated into multiple components)
+    
+    #filepath: string
+    #preprocessed_tibble: a tibble with all character columns. Supply this
+    #   argument if a dataset requires modification before it can be processed
+    #   by ms_read_raw_csv. This may be necessary if, e.g.
+    #   time is stored in a format that can't be parsed by standard datetime
+    #   format strings. Either filepath or preprocessed_tibble
+    #   must be supplied, but not both.
+    #datetime_cols: a named character vector. names are column names that
+    #   contain components of a datetime. values are format strings (e.g.
+    #   '%Y-%m-%d', '%H') corresponding to the datetime components in those
+    #   columns.
+    #datetime_tz: string specifying time zone. this specification must be
+    #   among those provided by OlsonNames()
+    #optionalize_nontoken_characters: character vector; used when there might be
+    #   variation in date/time formatting within a column. in regex speak,
+    #   optionalizing a token string means, "match this string if it exists,
+    #   but move on to the next token if it doesn't." All datetime parsing tokens
+    #   (like "%H") are optionalized automatically when this function converts
+    #   them to regex. But other tokens like ":" and "-" that might be used in
+    #   datetime strings are not. Concretely, if you wanted to read either "%H:%M:%S"
+    #   or "%H:%M" in the same column, you'd set optionalize_nontoken_characters = ':',
+    #   and then the parser wouldn't require there to be two colons in order to
+    #   match the string. Don't use this if you don't have to, because it reduces
+    #   specificity. See "optional" argument to dt_format_to_regex for more details.
+    #site_code_col: name of column containing site name information
+    #alt_site_code: optional list. Names of list elements are desired site_codes
+    #   within MacroSheds. List elements are character vectors of alternative
+    #   names that might be encountered. Used when sites are misnamed or need
+    #   to be changed due to inconsistencies within and across datasets.
+    #data_cols: vector of names of columns containing data. If elements of this
+    #   vector are named, names are taken to be the column names as they exist
+    #   in the file, and values are used to replace those names. Data columns that
+    #   aren't referred to in this argument will be omitted from the output,
+    #   as will their associated flag columns (if any).
+    #data_col_pattern: a string containing the wildcard "#V#",
+    #   which represents any number of characters. If data column names will be
+    #   used as-is, this wildcard is all you need. if data columns contain
+    #   recurring, superfluous characters, you can omit them with regex. for
+    #   example, if data columns are named outflow_x, outflow_y, outflow_...., use
+    #   data_col_pattern = 'outflow_#V#' and then you don't have to bother
+    #   typing the full names in your argument to data_cols.
+    #alt_datacol_pattern: optional string with same mechanics as
+    #   data_col_pattern. use this if there
+    #   might be a second way in which column names are generated, e.g.
+    #   output_x, output_y, output_....
+    #is_sensor: either a single logical value, which will be applied to all
+    #   variable columns OR a named logical vector with the same length and names as
+    #   data_cols. If the latter, names correspond to variable names in the file to be read.
+    #   TRUE means the corresponding variable(s) was/were
+    #   measured with a sensor (which may be susceptible to drift and/or fouling),
+    #   FALSE means the measurement(s) was/were not recorded by a sensor. This
+    #   category includes analytical measurement in a lab, visual recording, etc.
+    #set_to_NA: For values such as 9999 that are proxies for NA values.
+    #var_flagcol_pattern: optional string with same mechanics as the other
+    #   pattern parameters. this one is for columns containing flag
+    #   information that is specific to one variable. If there's only one
+    #   data column, omit this argument and use summary_flagcols for all
+    #   flag information.
+    #alt_varflagcol_pattern: optional string with same mechanics as the other
+    #   pattern parameters. just in case there are two naming conventions for
+    #   variable-specific flag columns
+    #summary_flagcols: optional unnamed vector of column names for flag columns
+    #   that pertain to all variables
+    #sampling_type: optional value to overwrite identify_sampling because in
+    #   some case this function is misidentifying sampling type. This must be a
+    #   single value of G or I and is applied to all variables in product
+    
+    #return value: a tibble of ordered and renamed columns, omitting any columns
+    #   from the original file that do not contain data, flag/qaqc information,
+    #   datetime, or site_code. All-NA data columns and their corresponding
+    #   flag columns will also be omitted, as will rows where all data values
+    #   are NA. Rows with NA in the datetime or site_code column are dropped.
+    #   data columns are given type double. all other
+    #   columns are given type character. data and flag/qaqc columns are
+    #   given two-letter prefixes representing sample regimen
+    #   (I = installed vs. G = grab; S = sensor vs N = non-sensor).
+    #   Data and flag/qaqc columns are also given
+    #   suffixes (__|flg and __|dat) that allow them to be cast into long format
+    #   by ms_cast_and_reflag.
+    
+    #checks
+    filepath_supplied <-  ! missing(filepath) && ! is.null(filepath)
+    tibble_supplied <-  ! missing(preprocessed_tibble) && ! is.null(preprocessed_tibble)
+    
+    if(filepath_supplied && tibble_supplied){
+        stop(glue('Only one of filepath and preprocessed_tibble can be supplied. ',
+                  'preprocessed_tibble is for rare circumstances only.'))
+    }
+    
+    
+    if(! datetime_tz %in% OlsonNames()){
+        stop('datetime_tz must be included in OlsonNames()')
+    }
+    
+    if(length(data_cols) == 1 &&
+       ! (missing(var_flagcol_pattern) || is.null(var_flagcol_pattern))){
+        stop(paste0('Only one data column. Use summary_flagcols instead ',
+                    'of var_flagcol_pattern.'))
+    }
+    
+    if(any(! is.logical(is_sensor))){
+        stop('all values in is_sensor must be logical.')
+    }
+    
+    svh_names <- names(is_sensor)
+    if(
+        length(is_sensor) != 1 &&
+        (is.null(svh_names) || any(is.na(svh_names)))
+    ){
+        stop('if is_sensor is not length 1, all elements must be named.')
+    }
+    
+    if(! all(data_cols %in% ms_vars$variable_code)) {
+        
+        for(i in 1:length(data_cols)) {
+            if(!data_cols[i] %in% ms_vars$variable_code) {
+                logerror(msg = paste(unname(data_cols[i]), 'is not in varibles.csv; add'),
+                         logger = logger_module)
+            }
+        }
+    }
+    
+    if(! is.null(sampling_type)){
+        if(! length(sampling_type) == 1){
+            stop('sampling_type must be a length of 1')
+        }
+        if(! sampling_type %in% c('G', 'I')){
+            stop('sampling_type must be either I or G')
+        }
+    }
+    
+    #parse args; deal with missing args
+    datetime_colnames <- names(datetime_cols)
+    datetime_formats <- unname(datetime_cols)
+    
+    alt_datacols <- var_flagcols <- alt_varflagcols <- NA
+    alt_datacol_names <- var_flagcol_names <- alt_varflagcol_names <- NA
+    if(missing(summary_flagcols)){
+        summary_flagcols <- NULL
+    }
+    
+    if(missing(set_to_NA)) {
+        set_to_NA <- NULL
+    }
+    
+    if(missing(alt_site_code)) {
+        alt_site_code <- NULL
+    }
+    
+    #fill in missing names in data_cols (for columns that are already
+    #   canonically named)
+    datacol_names0 <- names(data_cols)
+    if(is.null(datacol_names0)) datacol_names0 <- rep('', length(data_cols))
+    datacol_names0[datacol_names0 == ''] <-
+        unname(data_cols[datacol_names0 == ''])
+    
+    #expand data columnname wildcards and rename data_cols
+    datacol_names <- gsub_v(pattern = '#V#',
+                            replacement_vec = datacol_names0,
+                            x = data_col_pattern)
+    names(data_cols) <- datacol_names
+    
+    #expand alternative data columnname wildcards and populate alt_datacols
+    if(! missing(alt_datacol_pattern) && ! is.null(alt_datacol_pattern)){
+        alt_datacols <- data_cols
+        alt_datacol_names <- gsub_v(pattern = '#V#',
+                                    replacement_vec = datacol_names0,
+                                    x = alt_datacol_pattern)
+        names(alt_datacols) <- alt_datacol_names
+    }
+    
+    #expand varflag columnname wildcards and populate var_flagcols
+    if(! missing(var_flagcol_pattern) && ! is.null(var_flagcol_pattern)){
+        var_flagcols <- data_cols
+        var_flagcol_names <- gsub_v(pattern = '#V#',
+                                    replacement_vec = datacol_names0,
+                                    x = var_flagcol_pattern)
+        names(var_flagcols) <- var_flagcol_names
+    }
+    
+    #expand alt varflag columnname wildcards and populate alt_varflagcols
+    if(! missing(alt_varflagcol_pattern) && ! is.null(alt_varflagcol_pattern)){
+        alt_varflagcols <- data_cols
+        alt_varflagcol_names <- gsub_v(pattern = '#V#',
+                                       replacement_vec = datacol_names0,
+                                       x = alt_varflagcol_pattern)
+        names(alt_varflagcols) <- alt_varflagcol_names
+    }
+    
+    #combine all available column name mappings; assemble new name vector
+    colnames_all <- c(data_cols, alt_datacols, var_flagcols, alt_varflagcols)
+    na_inds <- is.na(colnames_all)
+    colnames_all <- colnames_all[! na_inds]
+    
+    suffixes <- rep(c('__|dat', '__|dat', '__|flg', '__|flg'),
+                    times = c(length(data_cols),
+                              length(alt_datacols),
+                              length(var_flagcols),
+                              length(alt_varflagcols)))
+    
+    suffixes <- suffixes[! na_inds]
+    colnames_new <- paste0(colnames_all, suffixes)
+    
+    colnames_all <- c(datetime_colnames, colnames_all)
+    names(colnames_all)[1:length(datetime_cols)] <- datetime_colnames
+    colnames_new <- c(datetime_colnames, colnames_new)
+    
+    if(! missing(site_code_col) && ! is.null(site_code_col)){
+        colnames_all <- c('site_code', colnames_all)
+        names(colnames_all)[1] <- site_code_col
+        colnames_new <- c('site_code', colnames_new)
+    }
+    
+    if(! is.null(summary_flagcols)){
+        nsumcol <- length(summary_flagcols)
+        summary_flagcols_named <- summary_flagcols
+        names(summary_flagcols_named) <- summary_flagcols
+        colnames_all <- c(colnames_all, summary_flagcols_named)
+        colnames_new <- c(colnames_new, summary_flagcols)
+    }
+    
+    #assemble colClasses argument to read.csv
+    classes_d1 <- rep('numeric', length(data_cols))
+    names(classes_d1) <- datacol_names
+    
+    classes_d2 <- rep('numeric', length(alt_datacols))
+    names(classes_d2) <- alt_datacol_names
+    
+    classes_f1 <- rep('character', length(var_flagcols))
+    names(classes_f1) <- var_flagcol_names
+    
+    classes_f2 <- rep('character', length(alt_varflagcols))
+    names(classes_f2) <- alt_varflagcol_names
+    
+    classes_f3 <- rep('character', length(summary_flagcols))
+    names(classes_f3) <- summary_flagcols
+    
+    class_dt <- rep('character', length(datetime_cols))
+    names(class_dt) <- datetime_colnames
+    
+    if(! missing(site_code_col) && ! is.null(site_code_col)){
+        class_sn <- 'character'
+        names(class_sn) <- site_code_col
+    }
+    
+    classes_all <- c(class_dt, class_sn, classes_d1, classes_d2, classes_f1,
+                     classes_f2, classes_f3)
+    classes_all <- classes_all[! is.na(names(classes_all))]
+    
+    if(filepath_supplied){
+        d <- read.csv(filepath,
+                      stringsAsFactors = FALSE,
+                      colClasses = "character")
+    } else {
+        d <- mutate(preprocessed_tibble,
+                    across(everything(), as.character))
+    }
+    
+    d <- d %>%
+        as_tibble() %>%
+        select(one_of(c(names(colnames_all), 'NA.'))) #for NA as in sodium
+    if('NA.' %in% colnames(d)) class(d$NA.) = 'character'
+    
+    # Remove any variable flags created by pattern but do not exist in data
+    # colnames_all <- colnames_all[names(colnames_all) %in% names(d)]
+    # classes_all <- classes_all[names(classes_all) %in% names(d)]
+    
+    # Set values to NA if used as a flag or missing data indication
+    # Not sure why %in% does not work, seem to only operate on one row
+    if(! is.null(set_to_NA)){
+        for(i in 1:length(set_to_NA)){
+            d[d == set_to_NA[i]] <- NA
+        }
+    }
+    
+    #Set correct class for each column
+    colnames_d <- colnames(d)
+    
+    for(i in 1:ncol(d)){
+        
+        if(colnames_d[i] == 'NA.'){
+            class(d[[i]]) <- 'numeric'
+            next
+        }
+        
+        class(d[[i]]) <- classes_all[names(classes_all) == colnames_d[i]]
+    }
+    # d[] <- sw(Map(`class<-`, d, classes_all)) #sometimes classes_all is too long, which makes this fail
+    
+    #rename cols to canonical names
+    for(i in 1:ncol(d)){
+        
+        if(colnames_d[i] == 'NA.'){
+            colnames_d[i] <- 'Na__|dat'
+            next
+        }
+        
+        canonical_name_ind <- names(colnames_all) == colnames_d[i]
+        if(any(canonical_name_ind)){
+            colnames_d[i] <- colnames_new[canonical_name_ind]
+        }
+    }
+    
+    colnames(d) <- colnames_d
+    
+    #resolve datetime structure into POSIXct
+    d  <- resolve_datetime(d = d,
+                           datetime_colnames = datetime_colnames,
+                           datetime_formats = datetime_formats,
+                           datetime_tz = datetime_tz,
+                           optional = optionalize_nontoken_characters)
+    
+    #remove rows with NA in datetime or site_code
+    d <- filter(d,
+                across(any_of(c('datetime', 'site_code')),
+                       ~ ! is.na(.x)))
+    
+    #remove all-NA data columns and rows with NA in all data columns.
+    #also remove flag columns for all-NA data columns.
+    all_na_cols_bool <- apply(select(d, ends_with('__|dat')),
+                              MARGIN = 2,
+                              function(x) all(is.na(x)))
+    all_na_cols <- names(all_na_cols_bool[all_na_cols_bool])
+    all_na_cols <- c(all_na_cols,
+                     sub(pattern = '__\\|dat',
+                         replacement = '__|flg',
+                         all_na_cols))
+    
+    d <- d %>%
+        select(-one_of(all_na_cols)) %>%
+        filter_at(vars(ends_with('__|dat')),
+                  any_vars(! is.na(.)))
+    
+    #for duplicated datetime-site_code pairs, keep the row with the fewest NA
+    #   values. We could instead do something more sophisticated.
+    d <- d %>%
+        rowwise(one_of(c('datetime', 'site_code'))) %>%
+        mutate(NAsum = sum(is.na(c_across(ends_with('__|dat'))))) %>%
+        ungroup() %>%
+        arrange(datetime, site_code, NAsum) %>%
+        select(-NAsum) %>%
+        distinct(datetime, site_code, .keep_all = TRUE) %>%
+        arrange(site_code, datetime)
+    
+    #convert NaNs to NAs, just in case.
+    d[is.na(d)] <- NA
+    
+    #either assemble or reorder is_sensor to match names in data_cols
+    if(length(is_sensor) == 1){
+        
+        is_sensor <- rep(is_sensor,
+                         length(data_cols))
+        names(is_sensor) <- unname(data_cols)
+        
+    } else {
+        
+        data_col_order <- match(names(is_sensor),
+                                names(data_cols))
+        is_sensor <- is_sensor[data_col_order]
+    }
+    
+    #fix sites names if multiple names refer to the same site
+    if(! is.null(alt_site_code)){
+        
+        for(z in 1:length(alt_site_code)){
+            
+            d <- mutate(d,
+                        site_code = ifelse(site_code %in% !!alt_site_code[[z]],
+                                           !!names(alt_site_code)[z],
+                                           site_code))
+        }
+    }
+    
+    #prepend two-letter code to each variable representing sample regimen and
+    #record sample regimen metadata
+    d <- sm(identify_sampling(df = d,
+                              is_sensor = is_sensor,
+                              domain = domain,
+                              network = network,
+                              prodname_ms = prodname_ms,
+                              sampling_type = sampling_type))
+    
+    #Check if all sites are in site file
+    unq_sites <- unique(d$site_code)
+    if(! all(unq_sites %in% site_data$site_code)){
+        
+        for(i in seq_along(unq_sites)) {
+            if(! unq_sites[i] %in% site_data$site_code){
+                logwarn(msg = paste(unname(unq_sites[i]),
+                                    'is not in site_data file; add?'),
+                        logger = logger_module)
+            }
+        }
+    }
+    
+    return(d)
+}
+
+gsub_v <- function(pattern, replacement_vec, x){
+    
+    #just like the first three arguments to gsub, except that
+    #   replacement is now a vector of replacements.
+    #return a vector of the same length as replacement_vec, where
+    #   each element in replacement_vec has been used once
+    
+    subbed <- sapply(replacement_vec,
+                     function(v) gsub(pattern = pattern,
+                                      replacement = v,
+                                      x = x),
+                     USE.NAMES = FALSE)
+    
+    return(subbed)
+}
+
+Mode <- function(x, na.rm = TRUE){
+    
+    if(na.rm){
+        x <- na.omit(x)
+    }
+    
+    ux <- unique(x)
+    mode_out <- ux[which.max(tabulate(match(x, ux)))]
+    return(mode_out)
+    
+}
+
+drop_var_prefix <- function(x){
+    
+    unprefixed <- substr(x, 4, nchar(x))
+    
+    return(unprefixed)
+}
+
+parse_molecular_formulae <- function(formulae){
+    
+    #`formulae` is a vector
+    
+    # formulae = c('C', 'C4', 'Cl', 'Cl2', 'CCl', 'C2Cl', 'C2Cl2', 'C2Cl2B2')
+    # formulae = 'BCH10He10PLi2'
+    # formulae='Mn'
+    
+    conc_vars = str_match(formulae, '^(?:OM|TM|DO|TD|UT|UTK|TK|TI|TO|DI)?([A-Za-z0-9]+)_?')[,2]
+    two_let_symb_num = str_extract_all(conc_vars, '([A-Z][a-z][0-9]+)')
+    conc_vars = str_remove_all(conc_vars, '([A-Z][a-z][0-9]+)')
+    one_let_symb_num = str_extract_all(conc_vars, '([A-Z][0-9]+)')
+    conc_vars = str_remove_all(conc_vars, '([A-Z][0-9]+)')
+    two_let_symb = str_extract_all(conc_vars, '([A-Z][a-z])')
+    conc_vars = str_remove_all(conc_vars, '([A-Z][a-z])')
+    one_let_symb = str_extract_all(conc_vars, '([A-Z])')
+    
+    constituents = mapply(c, SIMPLIFY=FALSE,
+                          two_let_symb_num, one_let_symb_num, two_let_symb, one_let_symb)
+    
+    return(constituents) # a list of vectors
+}
+
+combine_atomic_masses <- function(molecular_constituents){
+    
+    #`molecular_constituents` is a vector
+    
+    xmat = str_match(molecular_constituents,
+                     '([A-Z][a-z]?)([0-9]+)?')[, -1, drop=FALSE]
+    elems = xmat[,1]
+    mults = as.numeric(xmat[,2])
+    mults[is.na(mults)] = 1
+    molecular_mass = sum(PeriodicTable::mass(elems) * mults)
+    
+    return(molecular_mass) #a scalar
+}
+
+convert_unit <- function(x, input_unit, output_unit){
+    
+    units <- tibble(prefix = c('n', "u", "m", "c", "d", "h", "k", "M"),
+                    convert_factor = c(0.000000001, 0.000001, 0.001, 0.01, 0.1, 100,
+                                       1000, 1000000))
+    
+    old_fraction <- as.vector(str_split_fixed(input_unit, "/", n = Inf))
+    old_top <- as.vector(str_split_fixed(old_fraction[1], "", n = Inf))
+    
+    if(length(old_fraction) == 2) {
+        old_bottom <- as.vector(str_split_fixed(old_fraction[2], "", n = Inf))
+    }
+    
+    new_fraction <- as.vector(str_split_fixed(output_unit, "/", n = Inf))
+    new_top <- as.vector(str_split_fixed(new_fraction[1], "", n = Inf))
+    
+    if(length(new_fraction == 2)) {
+        new_bottom <- as.vector(str_split_fixed(new_fraction[2], "", n = Inf))
+    }
+    
+    old_top_unit <- str_split_fixed(old_top, "", 2)[1]
+    
+    if(old_top_unit %in% c('g', 'e', 'q', 'l') || old_fraction[1] == 'mol') {
+        old_top_conver <- 1
+    } else {
+        old_top_conver <- as.numeric(filter(units, prefix == old_top_unit)[,2])
+    }
+    
+    old_bottom_unit <- str_split_fixed(old_bottom, "", 2)[1]
+    
+    if(old_bottom_unit %in% c('g', 'e', 'q', 'l') || old_fraction[2] == 'mol') {
+        old_bottom_conver <- 1
+    } else {
+        old_bottom_conver <- as.numeric(filter(units, prefix == old_bottom_unit)[,2])
+    }
+    
+    new_top_unit <- str_split_fixed(new_top, "", 2)[1]
+    
+    if(new_top_unit %in% c('g', 'e', 'q', 'l') || new_fraction[1] == 'mol') {
+        new_top_conver <- 1
+    } else {
+        new_top_conver <- as.numeric(filter(units, prefix == new_top_unit)[,2])
+    }
+    
+    new_bottom_unit <- str_split_fixed(new_bottom, "", 2)[1]
+    
+    if(new_bottom_unit %in% c('g', 'e', 'q', 'l') || new_fraction[2] == 'mol') {
+        new_bottom_conver <- 1
+    } else {
+        new_bottom_conver <- as.numeric(filter(units, prefix == new_bottom_unit)[,2])
+    }
+    
+    new_val <- x*old_top_conver
+    new_val <- new_val/new_top_conver
+    
+    new_val <- new_val/old_bottom_conver
+    new_val <- new_val*new_bottom_conver
+    
+    return(new_val)
+}
+
+resolve_datetime <- function(d,
+                             datetime_colnames,
+                             datetime_formats,
+                             datetime_tz,
+                             optional){
+    
+    #d: a data.frame or tibble with at least one date or time column
+    #   (all date and/or time columns must contain character strings,
+    #   not parsed date/time/datetime objects).
+    #datetime_colnames: character vector; column names that contain
+    #   relevant datetime information.
+    #datetime_formats: character vector; datetime parsing tokens
+    #   (like '%A, %Y-%m-%d %I:%M:%S %p' or '%j') corresponding to the
+    #   elements of datetime_colnames.
+    #datetime_tz: character; time zone of the returned datetime column.
+    #optional: character vector; see dt_format_to_regex.
+    
+    #return value: d, but with a "datetime" column containing POSIXct datetimes
+    #   and without the input datetime columns
+    
+    dt_tb <- tibble(basecol = rep(NA, nrow(d)))
+    for(i in 1:length(datetime_colnames)){
+        
+        dt_comps <- str_match_all(string = datetime_formats[i],
+                                  pattern = '%([a-zA-Z])')[[1]][,2]
+        dt_regex <- dt_format_to_regex(datetime_formats[i],
+                                       optional = optional)
+        
+        dt_tb <- d %>%
+            select(one_of(datetime_colnames[i])) %>%
+            tidyr::extract(col = !!datetime_colnames[i],
+                           into = dt_comps,
+                           regex = dt_regex,
+                           remove = TRUE,
+                           convert = FALSE) %>%
+            bind_cols(dt_tb)
+    }
+    
+    dt_tb$basecol = NULL
+    
+    #fill in defaults if applicable:
+    #(12 for hour, 00 for minute and second, PM for AM/PM)
+    dt_tb <- dt_tb %>%
+        mutate(
+            across(any_of(c('H', 'I')), ~ifelse(is.na(.x), '12', .x)),
+            across(any_of(c('M', 'S')), ~ifelse(is.na(.x), '00', .x)),
+            across(any_of('p'), ~ifelse(is.na(.x), 'PM', .x)))
+    
+    #resolve datetime structure into POSIXct
+    datetime_formats_split <- stringr::str_extract_all(datetime_formats,
+                                                       '%[a-zA-Z]') %>%
+        unlist()
+    
+    dt_col_order <- match(paste0('%',
+                                 colnames(dt_tb)),
+                          datetime_formats_split)
+    
+    if('H' %in% colnames(dt_tb)){
+        dt_tb$H[dt_tb$H == ''] <- '00'
+    }
+    if('M' %in% colnames(dt_tb)){
+        dt_tb$M[dt_tb$M == ''] <- '00'
+    }
+    if('S' %in% colnames(dt_tb)){
+        dt_tb$S[dt_tb$S == ''] <- '00'
+    }
+    if('I' %in% colnames(dt_tb)){
+        dt_tb$I[dt_tb$I == ''] <- '00'
+    }
+    if('P' %in% colnames(dt_tb)){
+        dt_tb$P[dt_tb$P == ''] <- 'AM'
+    }
+    
+    dt_tb <- dt_tb %>%
+        tidyr::unite(col = 'datetime',
+                     everything(),
+                     sep = ' ',
+                     remove = TRUE) %>%
+        mutate(datetime = as_datetime(datetime,
+                                      format = paste(datetime_formats_split[dt_col_order],
+                                                     collapse = ' '),
+                                      tz = datetime_tz) %>%
+                   with_tz(tz = 'UTC'))
+    
+    d <- d %>%
+        bind_cols(dt_tb) %>%
+        select(-one_of(datetime_colnames), datetime) %>%#in case 'datetime' is in datetime_colnames
+        relocate(datetime)
+    
+    return(d)
+}
+
+dt_format_to_regex <- function(fmt, optional){
+    
+    #fmt is a character vector of datetime formatting strings, such as
+    #   '%A, %Y-%m-%d %I:%M:%S %p' or '%j'. each element of fmt that is a
+    #   datetime token is replaced with a regex string that matches
+    #   what the token represents. For example, '%Y' matches a 4-digit
+    #   year and '[0-9]{4}' matches a 4-digit numeric sequence. non-token
+    #   characters (anything not following a %) are not modified. Note that
+    #   tokens B, b, h, A, and a are replaced by '[a-zA-Z]+', which matches
+    #   any sequence of one or more alphabetic characters of either case,
+    #   not just meaningful month/day names 'Weds' or 'january'. Also note
+    #   that these tokens are not currently accepted: g, G, n, t, c, r, R, T.
+    #optional is a vector of characters that should be made
+    #   optional in the exported regex (followed by a '?'). This is useful if
+    #   e.g. fmt is '%H:%M:%S' and elements to be matched may either appear in
+    #   HH:MM:SS or HH:MM format. making the ":" character optional here
+    #   (via optional = ':') allows the hour and minute data to be retained,
+    #   whereas the regex engine would otherwise expect two ":"s, find
+    #   only one, and return NA.
+    
+    dt_format_regex <- list(Y = '([0-9]{4})?',
+                            y = '([0-9]{2})?',
+                            B = '([a-zA-Z]+)?',
+                            b = '([a-zA-Z]+)?',
+                            h = '([a-zA-Z]+)?',
+                            m = '([0-9]{1,2})?',
+                            e = '([0-9]{1,2})?',
+                            d = '([0-9]{2})?',
+                            j = '([0-9]{3})?',
+                            A = '([a-zA-Z]+)?',
+                            a = '([a-zA-Z]+)?',
+                            u = '([0-9]{1})?',
+                            w = '([0-9]{1})?',
+                            U = '([0-9]{2})?',
+                            W = '([0-9]{2})?',
+                            V = '([0-9]{2})?',
+                            C = '([0-9]{2})?',
+                            H = '([0-9]{1,2})?',
+                            I = '([0-9]{1,2})?',
+                            M = '([0-9]{1,2})?',
+                            S = '([0-9]{1,2})?',
+                            p = '([AP]M)?',
+                            z = '([+\\-][0-9]{4})?',
+                            `F` = '([0-9]{4}-[0-9]{2}-[0-9]{2})')
+    
+    for(i in 1:length(fmt)){
+        fmt_components <- str_match_all(string = fmt[i],
+                                        pattern = '%([a-zA-Z])')[[1]][,2]
+        
+        if(any(fmt_components %in% c('g', 'G', 'n', 't', 'c'))){
+            stop(paste('Tokens g, G, n, and t are not yet accepted.',
+                       'enhance dt_format_to_regex if you want to use them!'))
+        }
+        if(any(fmt_components %in% c('r', 'R', 'T'))){
+            stop('Tokens r, R, and T are not accepted. Use a different specification.')
+        }
+        
+        for(j in 1:length(fmt_components)){
+            component <- fmt_components[j]
+            fmt[i] <- sub(pattern = paste0('%', component),
+                          replacement = dt_format_regex[[component]],
+                          x = fmt[i])
+        }
+    }
+    
+    if(! missing(optional)){
+        for(o in optional){
+            fmt <- gsub(pattern = o,
+                        replacement = paste0(o, '?'),
+                        x = fmt)
+        }
+    }
+    
+    return(fmt)
+}
+
+escape_special_regex <- function(x){
+    
+    #x is a character vector. any special characters in x will be escaped with
+    #   a double backslash, e.g. "air.pressure.kpa" will become
+    #   "air\\.pressure\\.kpa"
+    
+    #this function currently only escapes "." and "|", because they're the
+    #   special regex characters that can appear in column names.
+    
+    special_regex_colchars <- c('.', '|')
+    special_regex <- paste0('([\\',
+                            paste(special_regex_colchars,
+                                  collapse = '\\'),
+                            '])')
+    
+    escaped <- gsub(pattern = special_regex,
+                    replacement = '\\\\\\1',
+                    x,
+                    perl = TRUE)
+    
+    return(escaped)
+}
+# clean ms=0, dirt= ms1, drop=delete
+ms_cast_and_reflag <- function(d,
+                               input_shape = 'wide',
+                               data_col_pattern = '#V#__|dat',
+                               varflag_col_pattern = '#V#__|flg',
+                               variable_flags_to_drop,
+                               variable_flags_clean,
+                               variable_flags_dirty,
+                               summary_flags_to_drop,
+                               summary_flags_clean,
+                               summary_flags_dirty){
+    
+    #TODO: add a silent = TRUE option. this would hide all warnings
+    #allow for alternative pattern specifications.
+    
+    #d is a df/tibble with ONLY a site_code column, a datetime column,
+    #   flag and/or status columns, and data columns. There must be no
+    #   columns with grouping data, variable names, units, methods, etc.
+    #   Data columns must be suffixed identically. Variable flag columns
+    #   must be suffixed identically and differently from data columns.
+    #   If d was generated by ms_read_raw_csv, it will be good to go.
+    #input_shape is the format ("wide"/"long") of d
+    #   (currently only "wide" supported).
+    #data_col_pattern: a string containing the wildcard "#V#",
+    #   which represents any number of characters, and the suffix that pertains
+    #   to data columns (currently this must be '#V#__|dat'.
+    #varflag_col_pattern: a string containing the wildcard "#V#",
+    #   which represents any number of characters, and the suffix that pertains
+    #   to variable flag/status columns (currently this must be '#V#__|flg'.
+    #   Or set this to NA if there are no variable-specific flag/status columns.
+    #variable_flags_to_drop: a character vector of values that might appear in
+    #   the variable flag columns. Elements of this vector are treated as
+    #   bad data and are removed. Use '#*#' to refer to all values not
+    #   included in variable_flags_clean. This parameter is optional,
+    #   though at least 2 of variable_flags_to_drop, variable_flags_clean,
+    #   and variable_flags_dirty must be supplied if varflag_col_pattern is not
+    #   set to NA.
+    #   If '#*#' is used, variable_flags_clean must be supplied.
+    #variable_flags_clean: a character vector of values that might appear in
+    #   the variable flag columns. Elements of this vector are given an
+    #   ms_status of 0, meaning clean. This parameter is optional, though at least 2
+    #   of variable_flags_to_drop, variable_flags_clean, and variable_flags_dirty
+    #   must be supplied if varflag_col_pattern is not
+    #   set to NA. This parameter does not use the '#*#' wildcard.
+    #variable_flags_dirty: a character vector of values that might appear in
+    #   the variable flag columns. Elements of this vector are given an
+    #   ms_status of 1, meaning dirty. This parameter is optional, though at least 2
+    #   of variable_flags_to_drop, variable_flags_clean, and variable_flags_dirty
+    #   must be supplied if varflag_col_pattern is not
+    #   set to NA. This parameter does not use the '#*#' wildcard.
+    #summary_flags_to_drop: a named list. names correspond to columns in d that
+    #   contain summary flag/status information. List elements must be character vectors
+    #   of values that might appear in
+    #   the summary flag/status columns. Elements of these vectors are treated as
+    #   bad data and are removed. Use '#*#' to refer to all values not
+    #   included in summary_flags_clean. This parameter is optional, though
+    #   if there are summary flag columns, at least 2
+    #   of summary_flags_to_drop, summary_flags_clean, and summary_flags_dirty
+    #   must be supplied (omit this argument otherwise).
+    #   If '#*#' is used, summary_flags_clean must be supplied.
+    #   make sure list elements for summary flags are in the same order!
+    #   there is currently no check for this.
+    #summary_flags_clean: a named list. names correspond to columns in d that
+    #   contain summary flag/status information. List elements must be character vectors
+    #   of values that might appear in the summary flag/status columns.
+    #   Elements of these vectors are given an ms_status of 0, meaning clean.
+    #   This parameter is optional, though
+    #   if there are summary flag columns, at least 2 of summary_flags_to_drop,
+    #   summary_flags_clean, and summary_flags_dirty must be supplied
+    #   (omit this argument otherwise).
+    #   make sure list elements for summary flags are in the same order!
+    #   there is currently no check for this.
+    #   Note: This parameter does not use the '#*#' wildcard.
+    #summary_flags_dirty: a named list. names correspond to columns in d that
+    #   contain summary flag/status information. List elements must be character vectors
+    #   of values that might appear in the summary flag/status columns.
+    #   Elements of these vectors are given an ms_status of 1, meaning dirty.
+    #   This parameter is optional, though
+    #   if there are summary flag columns, at least 2 of summary_flags_to_drop,
+    #   summary_flags_clean, and summary_flags_dirty must be supplied
+    #   (omit this argument otherwise).
+    #   make sure list elements for summary flags are in the same order!
+    #   there is currently no check for this.
+    #   Note: This parameter does not use the '#*#' wildcard.
+    
+    #return value: a long-format tibble with 5 columns: datetime, site_code,
+    #   var, val, ms_status. Rows with NA in any column are removed.
+    
+    #arg checks
+    if(! input_shape == 'wide'){
+        stop('ms_cast_and_reflag only implemented for input_shape = "wide"')
+    }
+    
+    sumdrop <- ! missing(summary_flags_to_drop) && ! is.null(summary_flags_to_drop)
+    sumclen <- ! missing(summary_flags_clean) && ! is.null(summary_flags_clean)
+    sumdirt <- ! missing(summary_flags_dirty) && ! is.null(summary_flags_dirty)
+    no_sumflags <- all(c(sumdrop, sumclen, sumdirt) == FALSE)
+    
+    if(sum(c(sumdrop, sumclen, sumdirt)) == 1){
+        stop(paste0('Must supply 2 (or none) of summary_flags_to_drop, ',
+                    'summary_flags_clean, summary_flags_dirty'))
+    }
+    
+    if(sumclen){
+        if(any(sapply(summary_flags_clean, function(x) '#*#' %in% x))){
+            stop(glue('the #*# wildcard may only be used in ',
+                      'summary_flags_to_drop and variable_flags_to_drop'))
+        }
+    }
+    if(sumdirt){
+        if(any(sapply(summary_flags_dirty, function(x) '#*#' %in% x))){
+            stop(glue('the #*# wildcard may only be used in ',
+                      'summary_flags_to_drop and variable_flags_to_drop'))
+        }
+    }
+    
+    if(sumdrop){
+        
+        drop_wildcard_bool <- sapply(summary_flags_to_drop, function(x) '#*#' %in% x)
+        if(any(drop_wildcard_bool) && ! sumclen){
+            stop(glue('if #*# wildcard is used in summary_flags_to_drop, ',
+                      'summary_flags_clean must be supplied'))
+        }
+        
+        drop_multicode_bool <- sapply(summary_flags_to_drop, function(x) length(x) > 1)
+        if(any(drop_wildcard_bool & drop_multicode_bool)){
+            stop(glue('if #*# wildcard is supplied as part of summary_flags_to_drop,',
+                      ' it must be in a character vector of length 1'))
+        }
+    }
+    
+    vardrop <- ! missing(variable_flags_to_drop) && ! is.null(variable_flags_to_drop)
+    varclen <- ! missing(variable_flags_clean) && ! is.null(variable_flags_clean)
+    vardirt <- ! missing(variable_flags_dirty) && ! is.null(variable_flags_dirty)
+    no_varflags <- is.na(varflag_col_pattern)
+    
+    if(sum(c(vardrop, varclen, vardirt)) < 2 && ! no_varflags){
+        stop(paste0('Must supply at least 2 of variable_flags_to_drop, ',
+                    'variable_flags_clean, variable_flags_dirty (or set ',
+                    'varflag_col_pattern = NA)'))
+    }
+    
+    if(vardrop){
+        
+        if('#*#' %in% variable_flags_to_drop && length(variable_flags_to_drop) > 1){
+            stop(glue('if #*# wildcard is used in variable_flags_to_drop,',
+                      ' it must be the only element in its argument vector'))
+        }
+        
+        if(variable_flags_to_drop == '#*#' && ! varclen){
+            stop(glue('if #*# wildcard is used in variable_flags_to_drop, ',
+                      'variable_flags_clean must be supplied'))
+        }
+    }
+    
+    if(! no_sumflags){
+        if(sumdrop){
+            summary_colnames <- names(summary_flags_to_drop)
+        } else {
+            summary_colnames <- names(summary_flags_clean)
+        }
+    } else {
+        summary_colnames <- NULL
+    }
+    
+    data_col_keyword <- gsub(pattern = '#V#',
+                             replacement = '',
+                             data_col_pattern)
+    
+    varflag_keyword <- gsub(pattern = '#V#',
+                            replacement = '',
+                            varflag_col_pattern)
+    
+    #cast to long format (would have to auto-generate names_pattern regex
+    #   to allow for data_col_pattern and varflag_col_pattern to vary) if
+    #   there's more than one data column. otherwise just remove data column
+    #   suffix.
+    ndatacols <- sum(grepl(escape_special_regex(data_col_keyword),
+                           colnames(d)))
+    if(ndatacols > 1){
+        
+        if(no_varflags){
+            d <- pivot_longer(data = d,
+                              cols = ends_with(data_col_keyword),
+                              names_pattern = '^(.+?)__\\|(dat)$',
+                              names_to = c('var', '.value'))
+        } else {
+            d <- pivot_longer(data = d,
+                              cols = ends_with(c(data_col_keyword, varflag_keyword)),
+                              names_pattern = '^(.+?)__\\|(dat|flg)$',
+                              names_to = c('var', '.value'))
+        }
+        
+    } else {
+        
+        data_ind <- grep(pattern = escape_special_regex(data_col_keyword),
+                         x = colnames(d))
+        
+        varname  <- gsub(pattern = escape_special_regex(data_col_keyword),
+                         replacement = '',
+                         x = colnames(d)[data_ind])
+        
+        colnames(d)[data_ind] <- 'dat'
+        d$var <- varname
+    }
+    
+    #remove rows with NA in the value column (these take up space and can be
+    #reconstructed by casting to wide form
+    d <- filter(d, ! is.na(dat))
+    
+    #filter rows with summary flags indicating bad data (data to drop)
+    if(! no_sumflags){
+        if(sumdrop){
+            for(i in 1:length(summary_flags_to_drop)){
+                
+                smtd <- summary_flags_to_drop[i]
+                
+                if(length(smtd[[1]]) == 1 && smtd[[1]] == '#*#'){
+                    d <- filter(d, (!!sym(names(smtd))) %in%
+                                    summary_flags_clean[[i]])
+                } else {
+                    d <- filter(d, ! (!!sym(names(smtd))) %in% smtd)
+                }
+            }
+            
+        } else {
+            
+            for(i in 1:length(summary_flags_clean)){
+                d <- filter(d, (!!sym(names(summary_flags_clean)[i])) %in%
+                                c(summary_flags_clean[[i]],
+                                  summary_flags_dirty[[i]]))
+            }
+        }
+    }
+    
+    #filter rows with variable flags indicating bad data (data to drop)
+    if(! no_varflags){
+        if(vardrop){
+            
+            if(variable_flags_to_drop == '#*#'){
+                d <- filter(d, flg %in% variable_flags_clean)
+            } else {
+                d <- filter(d, ! flg %in% variable_flags_to_drop)
+            }
+            
+        } else {
+            d <- filter(d, flg %in% c(variable_flags_clean, variable_flags_dirty))
+        }
+    }
+    
+    #binarize remaining flag information (0 = clean, 1 = dirty)
+    if(! no_varflags){
+        if(varclen){
+            d <- mutate(d, ms_status = case_when(
+                flg %in% variable_flags_clean ~ 0,
+                TRUE ~ 1))
+        } else {
+            d <- mutate(d, ms_status = case_when(
+                flg %in% variable_flags_dirty ~ 1,
+                TRUE ~ 0))
+        }
+    } else {
+        d$ms_status <- 0
+    }
+    
+    if(! no_sumflags){
+        if(sumclen){
+            for(i in 1:length(summary_flags_clean)){
+                si <- summary_flags_clean[i]
+                flg_bool <- ! d[[names(si)]] %in% si[[1]]
+                d$ms_status[flg_bool] <- 1
+            }
+        } else {
+            for(i in 1:length(summary_flags_dirty)){
+                si <- summary_flags_dirty[i]
+                flg_bool <- d[[names(si)]] %in% si[[1]]
+                d$ms_status[flg_bool] <- 1
+            }
+        }
+    }
+    
+    #rearrange columns (this also would have to be flexified if we ever want
+    #   to pass something other than the default for data_col_pattern or
+    #   varflag_col_pattern
+    d <- d %>%
+        select(-one_of(c(summary_colnames, 'flg'))) %>%
+        select(datetime, site_code, var, dat, ms_status) %>%
+        rename(val = dat) %>%
+        arrange(site_code, var, datetime)
+    
+    return(d)
+}
+
+ms_conversions <- function(d,
+                           keep_molecular, # this funciton automatically converts somehtng
+                                           # like NO3 into NO3 as N
+                           convert_units_from,
+                           convert_units_to){
+    
+    #d: a macrosheds tibble that has already been through ms_cast_and_reflag
+    #keep_molecular: a character vector of molecular formulae to be
+    #   left alone. Otherwise these formulae: NO3, SO4, PO4, SiO2, NH4, NH3, NO3_NO2
+    #   will be converted according to the atomic masses of their main
+    #   constituents. For example, NO3 should be converted to NO3-N within
+    #   macrosheds, but passing 'NO3' to keep_molecular will leave it as NO3.
+    #   The only time you'd want to do this is when a domain provides both
+    #   forms. In that case we would process both forms separately, converting
+    #   neither.
+    #convert_units_from: a named character vector. Names are variable names
+    #   without their sample-regimen prefixes (e.g. 'DIC', not 'GN_DIC'),
+    #   and values are the units of those variables. Omit variables that don't
+    #   need to be converted.
+    #convert_units_to: a named character vector. Names are variable names
+    #   without their sample-regimen prefixes (e.g. 'DIC', not 'GN_DIC'),
+    #   and values are the units those variables should be converted to.
+    #   Omit variables that don't need to be converted.
+    
+    #checks
+    # cm <- ! missing(convert_molecules)
+    cuF <- ! missing(convert_units_from) && ! is.null(convert_units_from)
+    cuT <- ! missing(convert_units_to) && ! is.null(convert_units_to)
+    
+    if(sum(cuF, cuT) == 1){
+        stop('convert_units_from and convert_units_to must be supplied together')
+    }
+    if(length(convert_units_from) != length(convert_units_to)){
+        stop('convert_units_from and convert_units_to must have the same length')
+    }
+    cu_shared_names <- base::intersect(names(convert_units_from),
+                                       names(convert_units_to))
+    if(length(cu_shared_names) != length(convert_units_to)){
+        stop('names of convert_units_from and convert_units_to must match')
+    }
+    
+    vars <- drop_var_prefix(d$var)
+    
+    convert_molecules <- c('NO3', 'SO4', 'PO4', 'SiO2', 'SiO3', 'NH4', 'NH3',
+                           'NO3_NO2')
+    
+    if(! missing(keep_molecular)){
+        if(any(! keep_molecular %in% convert_molecules)){
+            stop(glue('keep_molecular must be a subset of {cm}',
+                      cm = paste(convert_molecules,
+                                 collapse = ', ')))
+        }
+        convert_molecules <- convert_molecules[! convert_molecules %in% keep_molecular]
+    }
+    
+    convert_molecules <- convert_molecules[convert_molecules %in% unique(vars)]
+    
+    molecular_conversion_map <- list(
+        NH4 = 'N',
+        NO3 = 'N',
+        NH3 = 'N',
+        SiO2 = 'Si',
+        SiO3 = 'Si',
+        SO4 = 'S',
+        PO4 = 'P',
+        NO3_NO2 = 'N')
+    
+    # if(cm){
+    #     if(! all(convert_molecules %in% names(molecular_conversion_map))){
+    #         miss <- convert_molecules[! convert_molecules %in%
+    #                                       names(molecular_conversion_map)]
+    #         stop(glue('These molecules either need to be added to ',
+    #                   'molecular_conversion_map, or they should not be converted: ',
+    #                   paste(miss, collapse = ', ')))
+    #     }
+    # }
+    
+    #handle molecular conversions, like NO3 -> NO3_N
+    
+    for(v in convert_molecules){
+        
+        d$val[vars == v] <- convert_molecule(x = d$val[vars == v],
+                                             from = v,
+                                             to = unname(molecular_conversion_map[v]))
+        
+        check_double <- str_split_fixed(unname(molecular_conversion_map[v]), '', n = Inf)[1,]
+        
+        if(length(check_double) > 1 && length(unique(check_double)) == 1) {
+            molecular_conversion_map[v] <- unique(check_double)
+        }
+        
+        new_name <- paste0(d$var[vars == v], '_', unname(molecular_conversion_map[v]))
+        
+        d$var[vars == v] <- new_name
+    }
+    
+    # Converts input to grams if the final unit contains grams
+    for(i in 1:length(convert_units_from)){
+        
+        unitfrom <- convert_units_from[i]
+        unitto <- convert_units_to[i]
+        v <- names(unitfrom)
+        
+        g_conver <- FALSE
+        if(grepl('mol|eq', unitfrom) && grepl('g', unitto) ||
+           v %in% convert_molecules){
+            
+            d$val[vars == v] <- convert_to_gl(x = d$val[vars == v],
+                                              input_unit = unitfrom,
+                                              molecule = v)
+            
+            g_conver <- TRUE
+        }
+        
+        #convert prefix
+        d$val[vars == v] <- convert_unit(x = d$val[vars == v],
+                                         input_unit = unitfrom,
+                                         output_unit = unitto)
+        
+        #Convert to mol or eq if that is the output unit
+        if(grepl('mol|eq', unitto)) {
+            
+            d$val[vars == v] <- convert_from_gl(x = d$val[vars == v],
+                                                input_unit = unitfrom,
+                                                output_unit = unitto,
+                                                molecule = v,
+                                                g_conver = g_conver)
+        }
+    }
+    
+    return(d)
+}
+
+convert_to_gl <- function(x, input_unit, molecule) {
+    
+    molecule_real <- ms_vars %>%
+        filter(variable_code == !!molecule) %>%
+        pull(molecule)
+    
+    if(!is.na(molecule_real)) {
+        formula <- molecule_real
+    } else {
+        formula <- molecule
+    }
+    
+    if(grepl('eq', input_unit)) {
+        valence = ms_vars$valence[ms_vars$variable_code %in% molecule]
+        
+        if(length(valence) == 0) {stop('Varible is likely missing from ms_vars')}
+        x = (x * calculate_molar_mass(formula)) / valence
+        
+        return(x)
+    }
+    
+    if(grepl('mol', input_unit)) {
+        x = x * calculate_molar_mass(formula)
+        
+        return(x)
+    }
+    
+    return(x)
+    
+}
+
+convert_molecule <- function(x, from, to){
+    
+    #e.g. convert_molecule(1.54, 'NH4', 'N')
+    
+    molecule_real <- ms_vars %>%
+        filter(variable_code == !!from) %>%
+        pull(molecule)
+    
+    if(!is.na(molecule_real)) {
+        from <- molecule_real
+    }
+    
+    from_mass <- calculate_molar_mass(from)
+    to_mass <- calculate_molar_mass(to)
+    converted_mass <- x * to_mass / from_mass
+    
+    return(converted_mass)
+}
+
+calculate_molar_mass <- function(molecular_formula){
+    
+    if(length(molecular_formula) > 1){
+        stop('molecular_formula must be a string of length 1')
+    }
+    
+    parsed_formula = parse_molecular_formulae(molecular_formula)[[1]]
+    
+    molar_mass = combine_atomic_masses(parsed_formula)
+    
+    return(molar_mass)
+}
+
+identify_sampling <- function(df,
+                              is_sensor,
+                              date_col = 'datetime',
+                              network,
+                              domain,
+                              prodname_ms,
+                              sampling_type){
+    
+    #TODO: for hbef, identify_sampling is writing sites names as 1 not w1
+    
+    #is_sensor: named logical vector. see documention for
+    #   ms_read_raw_csv, but note that an unnamed logical vector of length one
+    #   cannot be used here. also note that the original variable/flag column names
+    #   from the raw file are converted to canonical macrosheds names by
+    #   ms_read_raw_csv before it passes is_sensor to identify_sampling.
+    
+    #checks
+    if(any(! is.logical(is_sensor))){
+        stop('all values in is_sensor must be logical.')
+    }
+    
+    svh_names <- names(is_sensor)
+    if(is.null(svh_names) || any(is.na(svh_names))){
+        stop('all elements of is_sensor must be named.')
+    }
+    
+    #parse is_sensor into a character vector of sample regimen codes
+    is_sensor <- ifelse(is_sensor, 'S', 'N')
+    
+    #set up directory system to store sample regimen metadata
+    sampling_dir <- glue('data/{n}/{d}',
+                         n = network,
+                         d = domain)
+    
+    sampling_file <- glue('data/{n}/{d}/sampling_type.json',
+                          n = network,
+                          d = domain)
+    
+    master <- try(jsonlite::fromJSON(readr::read_file(sampling_file)),
+                  silent = TRUE)
+    
+    if('try-error' %in% class(master)){
+        dir.create(sampling_dir, recursive = TRUE)
+        file.create(sampling_file)
+        master <- list()
+    }
+    
+    #determine and record sample regimen for each variable
+    col_names <- colnames(df)
+    
+    data_cols <- grep(pattern = '__[|]dat',
+                      col_names,
+                      value = TRUE)
+    
+    flg_cols <- grep(pattern = '__[|]flg',
+                     col_names,
+                     value = TRUE)
+    
+    site_codes <- unique(df$site_code)
+    
+    for(p in 1:length(data_cols)){
+        
+        # var_name <- str_split_fixed(data_cols[p], '__', 2)[1]
+        
+        # df_var <- df %>%
+        #     select(datetime, !!var_name := .data[[data_cols[p]]], site_code)
+        
+        all_sites <- tibble()
+        for(i in 1:length(site_codes)){
+            
+            # df_site <- df_var %>%
+            df_site <- df %>%
+                filter(site_code == !!site_codes[i]) %>%
+                arrange(datetime)
+            # ! is.na(.data[[date_col]]), #NAs here are indicative of bugs we want to fix, so let's let them through
+            # ! is.na(.data[[var_name]])) #NAs here are indicative of bugs we want to fix, so let's let them through
+            
+            dates <- df_site[[date_col]]
+            dif <- diff(dates)
+            unit <- attr(dif, 'units')
+            
+            conver_mins <- case_when(
+                unit %in% c('seconds', 'secs') ~ 0.01666667,
+                unit %in% c('minutes', 'mins') ~ 1,
+                unit == 'hours' ~ 60,
+                unit == 'days' ~ 1440,
+                TRUE ~ NA_real_)
+            
+            if(is.na(conver_mins)) stop('Weird time unit encountered. address this.')
+            
+            dif_mins <- as.numeric(dif) * conver_mins
+            dif_mins <- round(dif_mins)
+            
+            mode_mins <- Mode(dif_mins)
+            mean_mins <- mean(dif_mins, na.rm = T)
+            prop_mode_min <- length(dif_mins[dif_mins == mode_mins])/length(dif_mins)
+            
+            # remove gaps larger than 90 days (for seasonal sampling)
+            dif_mins <- dif_mins[dif_mins < 129600]
+            
+            if(length(dif_mins) == 0){
+                # This is grab
+                g_a <- tibble('site_code' = site_codes[i],
+                              'type' = 'G',
+                              'starts' = min(dates, na.rm = TRUE),
+                              'interval' = mode_mins)
+            } else{
+                if(prop_mode_min >= 0.3 && mode_mins <= 1440){
+                    # This is installed
+                    g_a <- tibble('site_code' = site_codes[i],
+                                  'type' = 'I',
+                                  'starts' = min(dates, na.rm = TRUE),
+                                  'interval' = mode_mins)
+                } else{
+                    if(mean_mins <= 1440){
+                        # This is installed (non standard interval like HBEF)
+                        g_a <- tibble('site_code' = site_codes[i],
+                                      'type' = 'I',
+                                      'starts' = min(dates, na.rm = TRUE),
+                                      'interval' = mean_mins)
+                    } else{
+                        # This is grab
+                        g_a <- tibble('site_code' = site_codes[i],
+                                      'type' = 'G',
+                                      'starts' = min(dates, na.rm = TRUE),
+                                      'interval' = mean_mins)
+                    }
+                }
+            }
+            
+            if(! is.null(sampling_type)){
+                g_a <- g_a %>%
+                    mutate(type = sampling_type)
+            }
+            
+            var_name_base <- str_split(string = data_cols[p],
+                                       pattern = '__\\|')[[1]][1]
+            
+            g_a <- g_a %>%
+                mutate(
+                    type = paste0(type,
+                                  !!is_sensor[var_name_base]),
+                    var = as.character(glue('{ty}_{vb}',
+                                            ty = type,
+                                            vb = var_name_base)))
+            
+            master[[prodname_ms]][[var_name_base]][[site_codes[i]]] <-
+                list('startdt' = g_a$starts,
+                     'type' = g_a$type,
+                     'interval' = g_a$interval)
+            
+            g_a <- g_a %>%
+                mutate(interval = as.character(interval))
+            
+            all_sites <- bind_rows(all_sites, g_a)
+        }
+        
+        #include new prefixes in df column names
+        prefixed_varname <- all_sites$var[1]
+        
+        dat_colname <- paste0(drop_var_prefix(prefixed_varname),
+                              '__|dat')
+        flg_colname <- paste0(drop_var_prefix(prefixed_varname),
+                              '__|flg')
+        
+        data_col_ind <- match(dat_colname,
+                              colnames(df))
+        flag_col_ind <- match(flg_colname,
+                              colnames(df))
+        
+        colnames(df)[data_col_ind] <- paste0(prefixed_varname,
+                                             '__|dat')
+        colnames(df)[flag_col_ind] <- paste0(prefixed_varname,
+                                             '__|flg')
+    }
+    
+    readr::write_file(jsonlite::toJSON(master), sampling_file)
+    
+    return(df)
+}
+
+
+carry_uncertainty <- function(d, network, domain, prodname_ms, ignore_arrange = FALSE){
+    
+    # Filter out any rows where vals are outside realistic  range, defined
+    # in variables sheet
+    d <- ms_check_range(d)
+    
+    u <- identify_detection_limit_t(d,
+                                    network = network,
+                                    domain = domain,
+                                    prodname_ms = prodname_ms,
+                                    return_detlims = TRUE,
+                                    ignore_arrange = ignore_arrange)
+    u <- detection_limit_as_uncertainty(u)
+    errors(d$val) <- u
+    # d <- insert_uncertainty_df(d, u)
+    
+    return(d)
+}
+
+
+synchronize_timestep <- function(d){
+    # desired_interval){
+    # impute_limit = 30){
+    
+    #d is a df/tibble with columns: datetime (POSIXct), site_code, var, val, ms_status
+    #desired_interval [HARD DEPRECATED] is a character string that can be parsed by the "by"
+    #   parameter to base::seq.POSIXt, e.g. "5 mins" or "1 day". THIS IS NOW
+    #   DETERMINED PROGRAMMATICALLY. WE'RE ONLY GOING TO HAVE 2 INTERVALS,
+    #   ONE FOR GRAB DATA AND ONE FOR SENSOR. IF WE EVER WANT TO CHANGE THEM,
+    #   IT WOULD BE BETTER TO CHANGE THEM JUST ONCE HERE, RATHER THAN IN
+    #   EVERY KERNEL
+    #impute_limit [HARD DEPRECATED] is the maximum number of consecutive points to
+    #   inter/extrapolate. it's passed to imputeTS::na_interpolate. THIS
+    #   PARAMETER WAS REMOVED BECAUSE IT SHOULD ONLY VARY WITH DESIRED INTERVAL.
+    
+    #output will include a numeric binary column called "ms_interp".
+    #0 for not interpolated, 1 for interpolated
+    
+    if(nrow(d) < 2 || sum(! is.na(d$val)) < 2){
+        stop('no data to synchronize. bypassing processing.')
+    }
+    
+    #split dataset by site and variable. for each, determine whether we're
+    #   dealing with ~daily data or ~15min data. set rounding_intervals
+    #   accordingly. This approach avoids OOM errors with giant groupings.
+    d_split <- d %>%
+        group_by(site_code, var) %>%
+        arrange(datetime) %>%
+        dplyr::group_split() %>%
+        as.list()
+    
+    mode_intervals_m <- vapply(
+        X = d_split,
+        FUN = function(x) Mode(diff(as.numeric(x$datetime)) / 60),
+        FUN.VALUE = 0)
+    
+    rounding_intervals <- case_when(
+        is.na(mode_intervals_m) | mode_intervals_m > 12 * 60 ~ '1 day',
+        mode_intervals_m <= 12 * 60 ~ '1 day') #TODO, TEMPORARY: switch this back
+    # mode_intervals_m <= 12 * 60 ~ '15 min')
+    
+    for(i in 1:length(d_split)){
+        
+        sitevar_chunk <- d_split[[i]]
+        
+        n_dupes <- sum(duplicated(sitevar_chunk$datetime) |
+                           duplicated(sitevar_chunk$datetime,
+                                      fromLast = TRUE))
+        
+        #average values for duplicate timestamps
+        if(n_dupes > 0){
+            
+            logwarn(msg = glue('{n} duplicate datetimes found for site: {s}, var: {v}',
+                               n = n_dupes,
+                               s = sitevar_chunk$site_code[1],
+                               v = sitevar_chunk$var[1]),
+                    logger = logger_module)
+            
+            sitevar_chunk_dt <- sitevar_chunk %>%
+                mutate(val_err = errors(val),
+                       val = errors::drop_errors(val)) %>%
+                as.data.table()
+            
+            #take the mean value for any duplicate timestamps
+            sitevar_chunk <- sitevar_chunk_dt[, .(
+                site_code = data.table::first(site_code),
+                var = data.table::first(var),
+                #data.table doesn't work with the errors package, but we're
+                #determining the uncertainty of the mean by the same method here:
+                #    max(SDM, mean(uncert)),
+                #    where SDM is the Standard Deviation of the Mean.
+                #The one difference is that we remove NAs when computing
+                #the standard deviation. Rationale: 1. This will only result in
+                #"incorrect" error values if there's an NA error coupled with a
+                #non-NA value (if the value is NA, the error must be too).
+                #I don't think this happens very often, if ever.
+                #2. an error of NA just looks like 0 error, which is more misleading
+                #than even a wild nonzero error.
+                val_err = max(sd_or_0(val, na.rm = TRUE) / sqrt(.N),
+                              mean(val_err, na.rm = TRUE)),
+                val = mean(val, na.rm = TRUE),
+                ms_status = numeric_any(ms_status)
+            ), keyby = datetime] %>%
+                as_tibble() %>%
+                mutate(val = set_errors(val, val_err)) %>%
+                select(-val_err)
+            
+            # sitevar_chunk <- sitevar_chunk %>%
+            #     group_by(datetime) %>%
+            #     summarize(site_code = first(site_code),
+            #               var = first(var),
+            #               val = mean(val, na.rm = TRUE),
+            #               ms_status = numeric_any(ms_status)) %>%
+            #     ungroup()
+        }
+        
+        #round each site-variable tibble's datetime column to the desired interval.
+        sitevar_chunk <- mutate(sitevar_chunk,
+                                datetime = lubridate::round_date(
+                                    x = datetime,
+                                    unit = rounding_intervals[i]))
+        
+        #split chunk into subchunks. one has duplicate datetimes to summarize,
+        #   and the other doesn't. both will be interpolated in a bit.
+        to_summarize_bool <- duplicated(sitevar_chunk$datetime) |
+            duplicated(sitevar_chunk$datetime,
+                       fromLast = TRUE)
+        
+        summary_and_interp_chunk <- sitevar_chunk[to_summarize_bool, ]
+        interp_only_chunk <- sitevar_chunk[! to_summarize_bool, ]
+        
+        if(nrow(summary_and_interp_chunk)){
+            
+            #summarize by sum for P, and mean for everything else
+            # var_is_q <- drop_var_prefix(sitevar_chunk$var[1]) == 'discharge'
+            var_is_p <- drop_var_prefix(sitevar_chunk$var[1]) == 'precipitation'
+            
+            summary_and_interp_chunk_dt <- summary_and_interp_chunk %>%
+                mutate(val_err = errors(val),
+                       val = errors::drop_errors(val)) %>%
+                as.data.table()
+            
+            sitevar_chunk <- summary_and_interp_chunk_dt[, .(
+                site_code = data.table::first(site_code),
+                var = data.table::first(var),
+                val_err = if(var_is_p)
+                {
+                    #the errors package uses taylor series expansion here.
+                    #maybe implement some day.
+                    sum(val_err, na.rm = TRUE)
+                } else {
+                    max(sd_or_0(val, na.rm = TRUE) / sqrt(.N),
+                        mean(val_err, na.rm = TRUE))
+                },
+                val = if(var_is_p) sum(val, na.rm = TRUE) else mean(val, na.rm = TRUE),
+                ms_status = numeric_any(ms_status)
+            ), by = datetime] %>%
+                as_tibble() %>%
+                mutate(val = set_errors(val, val_err)) %>%
+                select(-val_err) %>%
+                bind_rows(interp_only_chunk) %>%
+                arrange(datetime)
+            
+            # sitevar_chunk <- summary_and_interp_chunk %>%
+            #     group_by(datetime) %>%
+            #         summarize(
+            #             site_code = first(site_code),
+            #             var = first(var),
+            #             val = if(var_is_p)
+            #                 {
+            #                     sum(val, na.rm = TRUE)
+            #                 # } else if(var_is_q){
+            #                 #     max_ind <- which.max(val) #max() removes uncert
+            #                 #     if(max_ind) val[max_ind] else NA_real_
+            #                 } else {
+            #                     mean(val, na.rm = TRUE)
+            #                 },
+            #             ms_status = numeric_any(ms_status)) %>%
+            #         ungroup() %>%
+            #     bind_rows(interp_only_chunk) %>%
+            #     arrange(datetime)
+        }
+        
+        sitevar_chunk <- populate_implicit_NAs(
+            d = sitevar_chunk,
+            interval = rounding_intervals[i])
+        
+        d_split[[i]] <- ms_linear_interpolate(
+            d = sitevar_chunk,
+            interval = rounding_intervals[i])
+    }
+    
+    #recombine list of tibbles into single tibble
+    d <- d_split %>%
+        purrr::reduce(bind_rows) %>%
+        arrange(site_code, var, datetime) %>%
+        select(datetime, site_code, var, val, ms_status, ms_interp)
+    
+    return(d)
+}
+apply_detection_limit_t <- function(X,
+                                    network,
+                                    domain,
+                                    prodname_ms,
+                                    ignore_pred = FALSE){
+    
+    #this is the temporally explicit version of apply_detection_limit (_t).
+    #it supersedes the scalar version (apply_detection_limit_s).
+    #that version just returns its output. This version relies on stored data,
+    #so automatically reads from data/<network>/<domain>/detection_limits.json.
+    
+    #X is a 2d array-like object. must have datetime,
+    #   site_code, var, and val columns. if X was generated by ms_cast_and_reflag,
+    #   you should be good to go.
+    #ignore_pred: logical; set to TRUE if detection limits should be retrieved
+    #   from the supplied prodname_ms directly, rather than its precursor.
+    
+    #Attempting to apply detection
+    #limits to a variable for which detection limits are not known (not present
+    #in detection_limits.json) results in error. Superfluous variable entries in
+    #detection_limits.json are ignored.
+    
+    X <- as_tibble(X) %>%
+        arrange(site_code, var, datetime)
+    
+    if(ignore_pred &&
+       (length(prodname_ms) > 1 || ! is_derived_product(prodname_ms))){
+        stop('If ignoring precursors, a single derived prodname_ms must be supplied')
+    }
+    
+    if(length(prodname_ms) > 1 && any(is_derived_product(prodname_ms))){
+        #i can't think of a time when we'd need to supply multiple derived
+        #products and knit them, but if such a case exists feel free to
+        #amend this error checker
+        stop('Cannot knit multiple detlims when one or more of them is derived.')
+    }
+    
+    if(length(prodname_ms) == 1 &&
+       is_derived_product(prodname_ms) &&
+       ! ignore_pred){
+        
+        prodname_ms <- get_detlim_precursors(network = network,
+                                             domain = domain,
+                                             prodname_ms = prodname_ms)
+    }
+    
+    if(length(prodname_ms) > 1) {
+        detlim <- knit_det_limits(network = network,
+                                  domain = domain,
+                                  prodname_ms = prodname_ms)
+    } else {
+        detlim <- read_detection_limit(network = network,
+                                       domain = domain,
+                                       prodname_ms = prodname_ms)
+    }
+    
+    if(is_ms_err(detlim)){
+        stop('problem reading detection limits from file')
+    }
+    
+    apply_detection_limit_ <- function(x, varnm, detlim){
+        
+        
+        #plenty of code superfluity in this function. adapted from a previous
+        #   version and there's negligible efficiency loss if any
+        
+        if(! varnm %in% names(detlim)){
+            stop(glue('Missing detection limits for var: {v}', v = varnm))
+        }
+        
+        detlim_var <- detlim[[varnm]]
+        
+        x <- filter(x, var == varnm)
+        
+        #nrow(x) == 1 was added because there was an error occurring if there
+        #was a site with only one sample of a variable
+        if(nrow(x) == 0){
+            return(NULL)
+        }
+        
+        sn = x$site_code
+        dt = x$datetime
+        
+        site_lst <- tibble(dt, sn, val = x$val) %>%
+            base::split(sn)
+        
+        Xerr <- lapply(X = site_lst,
+                       FUN = function(z) errors(z$val)) %>%
+            unlist() %>%
+            unname()
+        
+        rounded <- lapply(X = site_lst,
+                          FUN = function(z){
+                              
+                              if(all(is.na(z$val))) return(z$val)
+                              
+                              detlim_varsite <- detlim_var[[z$sn[1]]]
+                              if(all(is.na(detlim_varsite$lim))) return(z$val)
+                              
+                              cutvec <- c(as.POSIXct(detlim_varsite$startdt,
+                                                     tz = 'UTC'),
+                                          as.POSIXct('2900-01-01 00:00:00'))
+                              
+                              roundvec <- cut(x = z$dt,
+                                              breaks = cutvec,
+                                              include.lowest = TRUE,
+                                              labels = detlim_varsite$lim) %>%
+                                  as.character() %>%
+                                  as.numeric()
+                              
+                              #sometimes synchronize_timestep will adjust a point
+                              #to a time before the earliest startdt recorded
+                              #in detection_limits.json. this handles that.
+                              if(length(roundvec == 1) && is.na(roundvec)){
+                                  roundvec = detlim_varsite$lim[1]
+                              } else {
+                                  roundvec <- imputeTS::na_locf(x = roundvec,
+                                                                option = 'nocb')
+                              }
+                              
+                              rounded <- mapply(FUN = function(a, b){
+                                  round(a, b)
+                              },
+                              a = z$val,
+                              b = roundvec,
+                              USE.NAMES = FALSE)
+                              
+                              return(rounded)
+                          }) %>%
+            unlist() %>%
+            unname()
+        
+        errors(rounded) <- Xerr
+        
+        return(rounded)
+    }
+    
+    variables <- unique(X$var)
+    
+    for(v in variables){
+        for(s in unique(X$site_code)){
+            x <- filter(X, site_code == s)
+            dlv <- apply_detection_limit_(x, v, detlim)
+            if(is.null(dlv)) next
+            X$val[X$site_code == s & X$var == v] <- dlv
+        }
+    }
+    
+    return(X)
+}
+
+
+ms_check_range <- function(d){
+    
+    d_vars <- unique(d$var)
+    
+    for(c in 1:length(d_vars)){
+        
+        var_p_frop <- drop_var_prefix(d_vars[c])
+        
+        min_val <- ms_vars %>%
+            filter(variable_code == !!var_p_frop) %>%
+            pull(val_min)
+        
+        if(!is.na(min_val)){
+            d <- d %>%
+                mutate(val = ifelse(var == !!d_vars[c] & as.numeric(val) < !!min_val, NA, val))
+        }
+        
+        max_val <- ms_vars %>%
+            filter(variable_code == !!var_p_frop) %>%
+            pull(val_max)
+        
+        if(!is.na(max_val)){
+            d <- d %>%
+                mutate(val = ifelse(var == !!d_vars[c] & as.numeric(val) > !!max_val, NA, val))
+        }
+    }
+    
+    d <- d %>%
+        filter(!is.na(val))
+}
+
+
+identify_detection_limit_t <- function(X, network, domain, prodname_ms,
+                                       return_detlims = FALSE,
+                                       ignore_arrange = FALSE){
+    
+    #this is the temporally explicit version of identify_detection_limit (_t).
+    #it supersedes the scalar version (identify_detection_limit_s).
+    #that version just returns its output. This version relies on stored data,
+    #so automatically writes to data/<network>/<domain>/detection_limits.json,
+    #and, if return_detlims = TRUE, returns its output as an integer vector
+    #of detection limits with length equal to the number of rows in X, where each
+    #value holds the detection limit of its corresponding data value in X$val
+    
+    #X is a 2d array-like object. must have datetime,
+    #site_code, var, and val columns. if X was generated by ms_cast_and_reflag,
+    #you're good to go.
+    
+    #the detection limit (number of decimal places)
+    #of each column is written to data/<network>/<domain>/detection_limits.json
+    #as a nested list:
+    #prodname_ms
+    #    variable
+    #        startdt: datetime1, datetime2, datetimeN...
+    #        lim:     limit1,    limit2,    limitN...
+    
+    #detection limit (detlim) is computed as the
+    #number of characters following the decimal. NA detlims are filled
+    #by locf, followed by nocb. Then, to account for false detlims arising from
+    #trailing zeros, positive monotonicity is forced by carrying forward
+    #cumulative maximum detlims. Each time the detlim increases,
+    #a new startdt and limit are recorded.
+    
+    #X will be sorted ascendingly by site_code, var, and then datetime. If
+    #   return_detlims = TRUE and you'll be using the output to establish
+    #   uncertainty, be sure that X is already sorted in this way, or detlims
+    #   won't line up with their corresponding data values.
+    #   If X was generated by ms_cast_and_reflag, you're good to go.
+    
+    if(!isTRUE(ignore_arrange)){
+        X <- as_tibble(X) %>%
+            arrange(site_code, var, datetime)
+    }
+    
+    identify_detection_limit_ <- function(X, v, output = 'list'){
+        
+        if(! output %in% c('vector', 'list')){
+            stop('output must be "vector" or "list"')
+        }
+        
+        x <- filter(X, var == v)
+        
+        if(nrow(x) == 0){
+            return(NULL)
+        }
+        
+        sn = x$site_code
+        dt = x$datetime
+        
+        options(scipen = 100)
+        nas <- is.na(x$val) | x$val == 0
+        
+        val <- as.character(x$val)
+        nsigdigs <- stringr::str_split_fixed(val, '\\.', 2)[, 2] %>%
+            nchar()
+        
+        nsigdigs[nas] <- NA
+        
+        #for each site, clean up the timeseries of detection limits:
+        #   first, fill NAs by locf, then by nocb
+        #   next, force positive monotonicity by locf
+        nsigdigs_l <- tibble(nsigdigs, dt, sn) %>%
+            base::split(sn) %>%
+            map(~ if(all(is.na(.x$nsigdigs))) .x else
+                mutate(.x,
+                       nsigdigs = imputeTS::na_locf(nsigdigs,
+                                                    na_remaining = 'rev') %>%
+                           force_monotonic_locf()))
+        
+        if(output == 'vector'){
+            
+            #avoid the case where the first few detection lims
+            #are artificially set low because their last sigdig is 0
+            nsigdigs_l <- lapply(X = nsigdigs_l,
+                                 FUN = function(z){
+                                     
+                                     #for sites with all-NA detlims, return as-is
+                                     if(all(is.na(z$nsigdigs))){
+                                         return(z)
+                                     }
+                                     
+                                     if(length(z$nsigdigs) > 5 &&
+                                        length(unique(z$nsigdigs[1:5]) > 1)){
+                                         z$nsigdigs[1:5] <- z$nsigdigs[6]
+                                     }
+                                     
+                                     return(z)
+                                 })
+            
+            nsigdigs_df <- Reduce(bind_rows, nsigdigs_l) %>%
+                arrange(sn, dt) #probably superfluous, but safe
+            
+            options(scipen = 0)
+            
+            detlims <- nsigdigs_df$nsigdigs
+            
+            return(detlims)
+        }
+        
+        #build datetime-detlim pairs for each change in detlim for each variable
+        detlims <- lapply(X = nsigdigs_l,
+                          FUN = function(z){
+                              
+                              #for sites with all-NA detlims, build the same
+                              #default list as above
+                              if(all(is.na(z$nsigdigs))){
+                                  detlims <- list(startdt = as.character(z$dt[1]),
+                                                  lim = NA)
+                                  return(detlims)
+                              }
+                              
+                              runs <- rle2(z$nsigdigs)
+                              
+                              #avoid the case where the first few detection lims
+                              #are artificially set low because their last
+                              #sigdig is 0
+                              if(runs$lengths[1] %in% 1:5 && nrow(runs) > 1){
+                                  runs <- runs[-1, ]
+                                  runs$starts[1] <- 1
+                              }
+                              
+                              detlims <- list(startdt = as.character(z$dt[runs$starts]),
+                                              lim = runs$values)
+                          })
+        
+        options(scipen = 0)
+        
+        return(detlims)
+    }
+    
+    variables <- unique(X$var)
+    
+    detlim <- lapply(variables,
+                     function(z) identify_detection_limit_(X, z))
+    detlim <- detlim[! sapply(detlim, is.null)]
+    names(detlim) <- variables
+    
+    write_detection_limit(detlim,
+                          network = network,
+                          domain = domain,
+                          prodname_ms = prodname_ms)
+    
+    if(return_detlims){
+        
+        detlim_v <- rep(NA, nrow(X))
+        
+        for(v in variables){
+            for(s in unique(X$site_code)){
+                x <- filter(X, site_code == s)
+                dlv <- identify_detection_limit_(x, v, output = 'vector')
+                if(is.null(dlv)) next
+                detlim_v[X$site_code == s & X$var == v] <- dlv
+            }
+        }
+        
+        return(detlim_v)
+    }
+    
+    #return()
+}
+
+
+force_monotonic_locf <- function(v, ascending = TRUE){
+    
+    if(any(is.na(v))){
+        stop('v may not contain NAs')
+    }
+    
+    if(ascending){
+        mv <- cummax(v)
+        adjust <- v < mv
+    } else {
+        mv <- cummin(v)
+        adjust <- v > mv
+    }
+    
+    runs <- rle2(adjust)
+    
+    for(i in which(runs$values)){
+        stt <- runs$starts[i]
+        stp <- runs$stops[i]
+        replc <- v[runs$stops[i - 1]]
+        v[stt:stp] <- replc
+    }
+    
+    return(v)
+}
+
+rle2 <- function(x){#, return_list = FALSE){
+    
+    r <- rle(x)
+    ends <- cumsum(r$lengths)
+    
+    # if(return_list){
+    #
+    #     r <- list(values = r$values,
+    #               starts = c(1, ends[-length(ends)] + 1),
+    #               stops = ends,
+    #               lengths = r$lengths)
+    #
+    # } else {
+    
+    r <- tibble(values = r$values,
+                starts = c(1, ends[-length(ends)] + 1),
+                stops = ends,
+                lengths = r$lengths)
+    # }
+    
+    return(r)
+}
+
+write_detection_limit <- function(detlim, network, domain, prodname_ms){
+    
+    #NOTE: this function updated 2021-02-16, near the end of rebuilding
+    #   LTER (discovered issue with luquillo sites overwriting each other in
+    #   the detlim file). as such, it's not thoroughly tested. some stuff
+    #   that worked before might be broken now. tried to make it backward compatible though
+    
+    detlims_file <- glue('data/{n}/{d}/detection_limits.json',
+                         n = network,
+                         d = domain)
+    
+    detlim_new <- detlim #better name; don't want to update every call though
+    
+    if(file.exists(detlims_file)){
+        
+        detlim_stored <- jsonlite::fromJSON(readr::read_file(detlims_file))
+        if(prodname_ms %in% names(detlim_stored)){
+            
+            for(v in names(detlim_new)){
+                
+                site_detlims <- detlim_new[[v]]
+                for(s in names(site_detlims)){
+                    detlim_stored[[prodname_ms]][[v]][[s]] <- site_detlims[[s]]
+                }
+            }
+            
+        } else {
+            detlim_stored[[prodname_ms]] <- detlim_new
+        }
+        
+    } else {
+        detlim_stored <- list(placeholder = detlim_new)
+        names(detlim_stored) <- prodname_ms
+    }
+    
+    readr::write_file(jsonlite::toJSON(detlim_stored), detlims_file)
+}
+
+detection_limit_as_uncertainty <- function(detlim){
+    
+    # uncert <- lapply(detlim,
+    #                  FUN = function(x) 1 / 10^x) %>%
+    #               as_tibble()
+    
+    uncert <- 1 / 10^detlim
+    
+    return(uncert)
+}
+
+sd_or_0 <- function(x, na.rm = FALSE){
+    
+    #Only used to bypass the tyranny of the errors package not letting
+    #me take the mean of an errors object of length 1 without setting the
+    #uncertainty to 0
+    
+    x <- if(is.vector(x) || is.factor(x)) x else as.double(x)
+    
+    if(length(x) == 1) return(0)
+    
+    x <- sqrt(var(x, na.rm = na.rm))
+}
+
+numeric_any <- function(num_vec){
+    return(as.numeric(any(as.logical(num_vec))))
+}
+
+
+populate_implicit_NAs <- function(d,
+                                  interval,
+                                  val_fill = NA,
+                                  edges_only = FALSE){
+    
+    #TODO: this would be more flexible if we could pass column names as
+    #   positional args and use them in group_by and mutate
+    
+    #d: a ms tibble with at minimum datetime, site_code, and var columns
+    #interval: the interval along which to populate missing values. (must be
+    #   either '15 min' or '1 day'.
+    #val_fill: character or NA. the token with which to populate missing
+    #   elements of the `val` column. All other columns will be populated
+    #   invariably with NA or 0. See details.
+    #edges_only: logical. if TRUE, only two filler rows will be inserted into each
+    #   gap, one just after the gap begins and the other just before the gap ends.
+    #   If FALSE (the default), the gap will be fully populated according to
+    #   the methods outlined in the details section.
+    
+    #this function makes implicit missing timeseries records explicit,
+    #   by populating rows so that the datetime column is complete
+    #   with respect to the sampling interval. In other words, if
+    #   samples are taken every 15 minutes, but some samples are skipped
+    #   (rows not present), this will create those rows. If ms_status or
+    #   ms_interp columns are present, their new records will be populated
+    #   with 0s. The val column will be populated with whatever is passed to
+    #   val_fill. Any other columns will be populated with NAs.
+    
+    #returns d, complete with new rows, sorted by site_code, then var, then datetime
+    
+    if(! interval %in% c('15 min', '1 day')){
+        stop('interval must be "15 min" or "1 day", unless we have decided otherwise')
+    }
+    
+    complete_d <- d %>%
+        mutate(fill_marker = 1) %>%
+        group_by(site_code, var) %>%
+        tidyr::complete(datetime = seq(min(datetime),
+                                       max(datetime),
+                                       by = interval)) %>%
+        # mutate(site_code = .$site_code[1],
+        #        var = .$var[1]) %>%
+        ungroup() %>%
+        arrange(site_code, var, datetime) %>%
+        select(datetime, site_code, var, everything())
+    
+    if(! any(is.na(complete_d$fill_marker))) return(d)
+    
+    if(! is.na(val_fill)){
+        complete_d$val[is.na(complete_d$fill_marker)] <- val_fill
+    }
+    
+    if('ms_status' %in% colnames(complete_d)){
+        complete_d$ms_status[is.na(complete_d$ms_status)] <- 0
+    }
+    
+    if('ms_interp' %in% colnames(complete_d)){
+        complete_d$ms_interp[is.na(complete_d$ms_interp)] <- 0
+    }
+    
+    if(edges_only){
+        
+        midgap_rows <- rle2(is.na(complete_d$fill_marker)) %>%
+            filter(values == TRUE) %>%
+            # if(nrow(fill_runs) == 0) return(d)
+            # midgap_rows <- fill_runs %>%
+            select(starts, stops) %>%
+            {purrr::map2(.x = .$starts,
+                         .y = .$stops,
+                         ~seq(.x, .y))} %>%
+            purrr::map(~( if(length(.x) <= 2)
+            {
+                return(NULL)
+            } else {
+                return(.x[2:(length(.x) - 1)])
+            }
+            )) %>%
+            unlist()
+        if(! is.null(midgap_rows)){
+            complete_d <- slice(complete_d,
+                                -midgap_rows)
+        }
+    }
+    
+    complete_d$fill_marker <- NULL
+    
+    return(complete_d)
+}
+
+
+ms_linear_interpolate <- function(d, interval){
+    
+    #d: a ms tibble with no ms_interp column (this will be created)
+    #interval: the sampling interval (either '15 min' or '1 day'). an
+    #   appropriate maxgap (i.e. max number of consecutive NAs to fill) will
+    #   be chosen based on this interval.
+    
+    #fills gaps up to maxgap (determined automatically), then removes missing values
+    
+    #TODO: prefer imputeTS::na_seadec when there are >=2 non-NA datapoints.
+    #   There are commented sections that begin this work, but we still would
+    #   need to calculate start and end when creating a ts() object. we'd
+    #   also need to separate uncertainty from the val column before converting
+    #   to ts. here is the line that could be added to this documentation
+    #   if we ever implement na_seadec:
+    #For linear interpolation with
+    #   seasonal decomposition, interval will also be used to determine
+    #   the fraction of the sampling period between samples.
+    
+    if(length(unique(d$site_code)) > 1){
+        stop(paste('ms_linear_interpolate is not designed to handle datasets',
+                   'with more than one site.'))
+    }
+    
+    if(length(unique(d$var)) > 1){
+        stop(paste('ms_linear_interpolate is not designed to handle datasets',
+                   'with more than one variable'))
+    }
+    
+    if(! interval %in% c('15 min', '1 day')){
+        stop('interval must be "15 min" or "1 day", unless we have decided otherwise')
+    }
+    
+    var <- drop_var_prefix(d$var[1])
+    max_samples_to_impute <- ifelse(test = var %in% c('precipitation', 'discharge'),
+                                    yes = 3, #is Q-ish
+                                    no = 15) #is chemistry/etc
+    
+    if(interval == '15 min'){
+        max_samples_to_impute <- max_samples_to_impute * 96
+    }
+    
+    # ts_delta_t <- ifelse(interval == '1 day', #we might want this if we use na_seadec
+    #                      1/365, #"sampling period" is 1 year; interval is 1/365 of that
+    #                      1/96) #"sampling period" is 1 day; interval is 1/(24 * 4)
+    
+    d <- arrange(d, datetime)
+    ms_interp_column <- is.na(d$val)
+    
+    d_interp <- d %>%
+        mutate(
+            
+            #carry ms_status to any rows that have just been populated (probably
+            #redundant now, but can't hurt)
+            ms_status <- imputeTS::na_locf(ms_status,
+                                           na_remaining = 'rev'),
+            
+            # val = if(sum(! is.na(val)) > 2){
+            #
+            #     #linear interp NA vals after seasonal decomposition
+            #     imputeTS::na_seadec(x = as.numeric(ts(val,
+            #                                start = ,
+            #                                end = ,
+            #                                deltat = ts_delta_t)),
+            #                         maxgap = max_samples_to_impute)
+            #
+            # } else if(sum(! is.na(val)) > 1){
+            val = if(sum(! is.na(val)) > 1){
+                
+                #linear interp NA vals
+                imputeTS::na_interpolation(val,
+                                           maxgap = max_samples_to_impute)
+                
+                #unless not enough data in group; then do nothing
+            } else val
+        ) %>%
+        mutate(
+            err = errors(val), #extract error from data vals
+            err = case_when(
+                err == 0 ~ NA_real_, #change new uncerts (0s by default) to NA
+                TRUE ~ err),
+            val = if(sum(! is.na(err)) > 0){
+                set_errors(val, #and then carry error to interped rows
+                           imputeTS::na_locf(err,
+                                             na_remaining = 'rev'))
+            } else {
+                set_errors(val, #unless not enough error to interp
+                           0)
+            }) %>%
+        select(any_of(c('datetime', 'site_code', 'var', 'val', 'ms_status', 'ms_interp'))) %>%
+        arrange(site_code, var, datetime)
+    
+    ms_interp_column <- ms_interp_column & ! is.na(d_interp$val)
+    d_interp$ms_interp <- as.numeric(ms_interp_column)
+    d_interp <- filter(d_interp,
+                       ! is.na(val))
+    
+    return(d_interp)
+}
+
+is_derived_product <- function(prodname_ms){
+    
+    is_derived <- grepl('^ms[0-9]{3}$',
+                        prodcode_from_prodname_ms(prodname_ms),
+                        perl = TRUE)
+    
+    return(is_derived)
+}
+
+prodcode_from_prodname_ms <- function(prodname_ms){
+    
+    #prodname_ms consists of the macrosheds official name for a data
+    #category, e.g. discharge, and the source-specific code for that
+    #data product, e.g. DP1.20093. These two values are concatenated,
+    #separated by a double underscore. So long as we never use a double
+    #underscore in a macrosheds official data category name, this function
+    #will be able to split a prodname_ms into its two constituent parts.
+    
+    #accepts a vector of prodname_ms strings
+    
+    prodcode <- sapply(prodname_ms,
+                       function(x){
+                           namesplit <- strsplit(x, '__')[[1]]
+                           name_length <- length(namesplit)
+                           prodcode <- namesplit[2:name_length]
+                           paste(prodcode, collapse = '__')
+                       },
+                       USE.NAMES = FALSE)
+    
+    # namesplit <- strsplit(prodname_ms, '__')[[1]]
+    # name_length <- length(namesplit)
+    # prodcode <- namesplit[2:name_length]
+    # prodcode <- paste(prodcode, collapse = '__')
+    
+    return(prodcode)
+}
+
+
+read_detection_limit <- function(network, domain, prodname_ms){
+    
+    detlims <- glue('data/{n}/{d}/detection_limits.json',
+                    n = network,
+                    d = domain) %>%
+        readr::read_file() %>%
+        jsonlite::fromJSON()
+    
+    detlims_prod <- detlims[[prodname_ms]]
+    
+    return(detlims_prod)
+}
+
+generate_ms_err = function(text=1){
+    errobj = text
+    class(errobj) = 'ms_err'
+    return(errobj)
+}
+
+generate_ms_exception = function(text=1){
+    excobj = text
+    class(excobj) = 'ms_exception'
+    return(excobj)
+}
+
+generate_blacklist_indicator = function(text=1){
+    indobj = text
+    class(indobj) = 'blacklist_indicator'
+    return(indobj)
+}
+
+is_ms_err <- function(x){
+    return('ms_err' %in% class(x))
+}
+
+is_ms_exception <- function(x){
+    return('ms_exception' %in% class(x))
+}
+
+is_blacklist_indicator <- function(x){
+    return('blacklist_indicator' %in% class(x))
+}
+
+
+write_ms_file <- function(d,
+                          network,
+                          domain,
+                          prodname_ms,
+                          site_code,
+                          level = 'munged',
+                          shapefile = FALSE,
+                          link_to_portal = FALSE,
+                          sep_errors = TRUE){
+    
+    #write an ms tibble or shapefile to its appropriate destination based on
+    #network, domain, prodname_ms, site_code, and processing level. If a tibble,
+    #write as a feather file (site_code.feather). Uncertainty (error) associated
+    #with the val column will be extracted into a separate column called
+    #val_err. Write the file to the appropriate location within the data
+    #acquisition repository.
+    
+    #deprecated:
+    #if link_to_portal == TRUE, create a hard link to the
+    #file from the portal repository, which is assumed to be a sibling of the
+    #data_acquision directory and to be named "portal".
+    
+    if(link_to_portal){
+        stop("we're not linking to portal this way anymore. see create_portal_links()")
+    }
+    
+    if(! level %in% c('munged', 'derived')){
+        stop('level must be "munged" or "derived"')
+    }
+    
+    if(shapefile){
+        
+        site_dir = glue('data/{n}/{d}/{l}/{p}/{s}',
+                        n = network,
+                        d = domain,
+                        l = level,
+                        p = prodname_ms,
+                        s = site_code)
+        
+        dir.create(site_dir,
+                   showWarnings = FALSE,
+                   recursive = TRUE)
+        
+        if(any(! sf::st_is_valid(d))) {
+            d <- sf::st_make_valid(d)
+        }
+        
+        sw(sf::st_write(obj = d,
+                        dsn = glue(site_dir, '/', site_code, '.shp'),
+                        delete_dsn = TRUE,
+                        quiet = TRUE))
+        
+    } else {
+        
+        prod_dir = glue('data/{n}/{d}/{l}/{p}',
+                        n = network,
+                        d = domain,
+                        l = level,
+                        p = prodname_ms)
+        
+        dir.create(prod_dir,
+                   showWarnings = FALSE,
+                   recursive = TRUE)
+        
+        site_file = glue('{pd}/{s}.feather',
+                         pd = prod_dir,
+                         s = site_code)
+        
+        if(sep_errors) {
+            
+            #separate uncertainty into a new column.
+            #remove errors attribute from val column if it exists (it always should)
+            d$val_err <- errors(d$val)
+            if('errors' %in% class(d$val)){
+                d$val <- errors::drop_errors(d$val)
+            } else {
+                warning(glue('Uncertainty missing from val column ({n}-{d}-{s}-{p}). ',
+                             'That means this dataset has not passed through ',
+                             'carry_uncertainty yet. it should have.',
+                             n = network,
+                             d = domain,
+                             s = site_code,
+                             p = prodname_ms))
+            }
+        }
+        #make sure write_feather will omit attrib by def (with no artifacts)
+        write_feather(d, site_file)
+    }
+    
+    if(link_to_portal){
+        create_portal_link(network = network,
+                           domain = domain,
+                           prodname_ms = prodname_ms,
+                           site_code = site_code,
+                           level = level,
+                           dir = shapefile)
+    }
+    
+    #return()
+}
+
+combine_products <- function(network, domain, prodname_ms,
+                             input_prodname_ms) {
+    
+    #Used to combine multiple products into one. Used when discharge, chemistry,
+    #or other products are split into multiple products and we want them in one.
+    
+    files <- ms_list_files(network = network,
+                           domain = domain,
+                           prodname_ms = input_prodname_ms)
+    
+    dir <- glue('data/{n}/{d}/derived/{p}',
+                n = network,
+                d = domain,
+                p = prodname_ms)
+    
+    dir.create(dir, showWarnings = FALSE)
+    
+    site_feather <- str_split_fixed(files, '/', n = Inf)[,6]
+    sites <- unique(str_split_fixed(site_feather, '[.]feather', n = Inf)[,1])
+    
+    for(i in 1:length(sites)) {
+        site_files <- grep(paste0(sites[i], '.feather'), files, value = TRUE)
+        
+        site_full <- map_dfr(site_files, read_feather)
+        
+        write_ms_file(d = site_full,
+                      network = network,
+                      domain = domain,
+                      prodname_ms = prodname_ms,
+                      site_code = sites[i],
+                      level = 'derived',
+                      shapefile = FALSE)
+    }
+}
+
+ms_list_files <- function(network, domain, prodname_ms){
+    
+    #level is either "munged" or "derived"
+    #prodname_ms can be a single string or a vector
+    
+    level <- ifelse(is_derived_product(prodname_ms), 'derived', 'munged')
+    
+    files <- glue('data/{n}/{d}/{l}/{p}',
+                  n = network,
+                  d = domain,
+                  l = level,
+                  p = prodname_ms) %>%
+        list.files(full.names = TRUE)
+    
+    return(files)
+}
