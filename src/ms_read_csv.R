@@ -64,13 +64,12 @@ item_replace <- function(df,
     return(df)
 }
 
-
 datetime_clean <- function(df, 
                        time_col, 
                        default_dt = 1200, 
                        # allows you to skip NAs, 
                        # FALSE reassigns to default_dt
-                       ignore_na = FALSE, 
+                       ignore_dt_na = TRUE, 
                        # allows user to specify other values to 
                        # reassign to default_dt, can be single 
                        # or vector
@@ -82,8 +81,8 @@ datetime_clean <- function(df,
     for(i in 1:nrow(df[time_col])) {
         # if it is NA
         if (is.na(df[time_col][i, ])) {
-            # pass if ignore_na is TRUE
-            if (ignore_na) {
+            # pass if ignore_dt_na is TRUE
+            if (ignore_dt_na) {
                 next()
             # replace with default time if FALSE
             } else {
@@ -134,10 +133,9 @@ datetime_clean <- function(df,
     return(df)
 }
 
-# here <- item_replace(d, names(d), c("." = "1200"))
-# 
-here <- datetime_clean(d, 'RecTime', replace_value = ".")
-here <- datetime_clean(d, 'RecDay', dt_type = 'day')
+here <- item_replace(d, 'RecTime', c("." = 1200))
+# here <- datetime_clean(d, 'RecTime', replace_value = ".")
+# here <- datetime_clean(d, 'RecDay', dt_type = 'day')
 
 # 
 # d <- d %>%
@@ -153,12 +151,11 @@ here <- datetime_clean(d, 'RecDay', dt_type = 'day')
 #     mutate(day = ifelse(num_d == 1, paste0('0', as.character(RecDay)), as.character(RecDay))) %>%
 #     select(-num_t, -RecTime, -num_d, -RecDay)
 
-d_test_datetime_cols <- list('RecYear' = '%Y',
-                           'RecMonth' = '%m',
-                           'day' = '%d',
-                           'time' = '%H%M')
-
-nchar_tester(d, d_test_datetime_cols)
+# d_test_datetime_cols <- list('RecYear' = '%Y',
+#                            'RecMonth' = '%m',
+#                            'day' = '%d',
+#                            'time' = '%H%M')
+# nchar_tester(d, d_test_datetime_cols)
 
 # trawler for flagging good/bad
 TP_codes <- c('TP below Det limit', 'TP<Det limit', 'tp< det limit', 'TP below Det limit',
@@ -204,7 +201,22 @@ ms_read_raw_csv <- function(filepath,
                             var_flagcol_pattern,
                             alt_varflagcol_pattern,
                             summary_flagcols,
-                            replacements_dict = c(),
+                            # a vector of column names in which
+                            # to look for replacement values
+                            # as dictated by replacement_dicts
+                            rpl_cols = c(),
+                            # a dictionary of key-value pairs
+                            # of type, 'old.str':'new.str'
+                            # used in conjunction with rpl_cols
+                            # to allow user to clean out unwanted values
+                            replace_dict = c(),
+                            # dictate whether replacer function
+                            # glides over NAs, or, user can elect to
+                            # change to FALSE, and
+                            ignore_na = TRUE,
+                            # provide a na_replacer value- and the function
+                            # will replace all NAs with this value
+                            na_replacer = FALSE,
                             sampling_type = NULL){
     
     #checks
@@ -279,7 +291,7 @@ ms_read_raw_csv <- function(filepath,
     #fill in missing names in data_cols (for columns that are already
     #   canonically named)
     datacol_names0 <- names(data_cols)
-    if(is.null(datacol_names0R)) datacol_names0 <- rep('', length(data_cols))
+    if(is.null(datacol_names0)) datacol_names0 <- rep('', length(data_cols))
     datacol_names0[datacol_names0 == ''] <-
         unname(data_cols[datacol_names0 == ''])
     
@@ -385,15 +397,12 @@ ms_read_raw_csv <- function(filepath,
                     across(everything(), as.character))
     }
     
+    d <- item_replace(d, rpl_cols, replace_dict, ignore_na, na_replacer)
+    
     d <- d %>%
         as_tibble() %>%
         select(one_of(c(names(colnames_all), 'NA.'))) #for NA as in sodium
     if('NA.' %in% colnames(d)) class(d$NA.) = 'character'
-    
-    # test df for incorrect character numbers in datetime
-    # issue warning if non-uniform nchar in any datetime col                     
-    nchar_tester(d, datetime_cols)
-    
     
     # Remove any variable flags created by pattern but do not exist in data
     # colnames_all <- colnames_all[names(colnames_all) %in% names(d)]
@@ -533,11 +542,11 @@ ms_read_raw_csv <- function(filepath,
     return(d)
 }
 
-d <- ms_read_raw_csv(preprocessed_tibble = d,
+ms_d <- ms_read_raw_csv(preprocessed_tibble = d,
                      datetime_cols = list('RecYear' = '%Y',
                                           'RecMonth' = '%m',
-                                          'day' = '%d',
-                                          'time' = '%H%M'),
+                                          'RecDay' = '%d',
+                                          'RecTime' = '%H%M'),
                      datetime_tz = 'US/Central',
                      site_code_col = 'WATERSHED',
                      alt_site_code = list('N04D' = 'n04d',
@@ -557,7 +566,8 @@ d <- ms_read_raw_csv(preprocessed_tibble = d,
                      var_flagcol_pattern = '#V#_code',
                      summary_flagcols = 'check',
                      set_to_NA = '.',
-                     # replacer = c("")
+                     rpl_cols = c('RecTime'),
+                     replace_dict = c("." = 1200),
                      is_sensor = FALSE)
 
 
