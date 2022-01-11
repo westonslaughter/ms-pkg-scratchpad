@@ -65,8 +65,9 @@ item_replace <- function(df,
 }
 
 datetime_clean <- function(df, 
-                       time_col, 
-                       default_dt = 1200, 
+                       # dictionary of form: c('datetime_column_name' = 'datetime_type')  'datetime_type' options: 'time' 'day' 'month' 'year'    
+                       dt_dict, 
+                       dt_defaults_dict = c('time' = 1200, 'day' = 00, 'month' = 00, 'year' = 2000),
                        # allows you to skip NAs, 
                        # FALSE reassigns to default_dt
                        ignore_dt_na = TRUE, 
@@ -74,66 +75,67 @@ datetime_clean <- function(df,
                        # reassign to default_dt, can be single 
                        # or vector
                        replace_value = FALSE,
-                       # options: 'time' 'day' 'month' 'year'
-                       dt_type = 'time'
                        ) {
-    # loop through every time value
-    for(i in 1:nrow(df[time_col])) {
-        # if it is NA
-        if (is.na(df[time_col][i, ])) {
-            # pass if ignore_dt_na is TRUE
-            if (ignore_dt_na) {
-                next()
-            # replace with default time if FALSE
-            } else {
+    # loop through every provided datetime_type
+    for (time_col in names(dt_dict)) {
+        # loop through every time value
+        for(i in 1:nrow(df[time_col])) {
+            # if it is NA
+            if (is.na(df[time_col][i, ])) {
+                # pass if ignore_dt_na is TRUE
+                if (ignore_dt_na) {
+                    next()
+                    # replace with default time if FALSE
+                } else {
+                    df[time_col][i, ] <- default_dt
+                }
+                # if it is equal to replace_value
+            } else if (df[time_col][i, ] %in% replace_value) {
+                # replace with the default
                 df[time_col][i, ] <- default_dt
+                # if the default time is midnight
+            } else if (dt_dict[time_col] == 'time') {
+                # make sure that all entries have 4 digits
+                if(nchar(df[time_col][i, ]) == 1) {
+                    df[time_col][i, ] <- paste0(000, df[time_col][i, ])
+                } else if(nchar(df[time_col][i, ]) == 2) {
+                    df[time_col][i, ] <- paste0(00, df[time_col][i, ])
+                } else if(nchar(df[time_col][i, ]) == 3) {
+                    df[time_col][i, ] <- paste0(0, df[time_col][i, ])
+                } else if(nchar(df[time_col][i, ]) == 4) {
+                    df[time_col][i, ] <- as.character(df[time_col][i, ])
+                } else if(nchar(df[time_col][i, ]) > 4) {
+                    print("ERROR: greater than 4 character entry in the time column")
+                }
+            } else if (dt_dict[time_col] == 'day'| dt_dict[time_col] == 'month') {
+                if(nchar(df[time_col][i, ]) == 1) {
+                    df[time_col][i, ] <- paste0(0, df[time_col][i, ])
+                } else if(nchar(df[time_col][i, ]) == 2) {
+                    df[time_col][i, ] <- as.character(df[time_col][i, ])
+                } else if(nchar(df[time_col][i, ]) > 2) {
+                    print("ERROR: greater than 2 character entry in the month column")
+                }
+            } else if (dt_dict[time_col] == 'year' ) {
+                if(nchar(df[time_col][i, ]) == 1) {
+                    df[time_col][i, ] <- paste0(200, df[time_col][i, ])
+                } else if(nchar(df[time_col][i, ]) == 2) {
+                    df[time_col][i, ] <- paste0(20, df[time_col][i, ])
+                } else if(nchar(df[time_col][i, ]) == 3) {
+                    df[time_col][i, ] <- paste0(2, df[time_col][i, ])
+                } else if(nchar(df[time_col][i, ]) == 4) {
+                    df[time_col][i, ] <- as.character(df[time_col][i, ])
+                } else if(nchar(df[time_col][i, ]) > 4) {
+                    print("ERROR: greater than 4 character entry in the year column")
+                }
+            } else {
+                print("ERROR: incorrect datetime type, options are 'time' 'day' 'month' 'year'")
             }
-        # if it is equal to replace_value
-        } else if (df[time_col][i, ] %in% replace_value) {
-            # replace with the default
-            df[time_col][i, ] <- default_dt
-        # if the default time is midnight
-        } else if (dt_type == 'time') {
-            # make sure that all entries have 4 digits
-            if(nchar(df[time_col][i, ]) == 1) {
-                df[time_col][i, ] <- paste0(000, df[time_col][i, ])
-            } else if(nchar(df[time_col][i, ]) == 2) {
-                df[time_col][i, ] <- paste0(00, df[time_col][i, ])
-            } else if(nchar(df[time_col][i, ]) == 3) {
-                df[time_col][i, ] <- paste0(0, df[time_col][i, ])
-            } else if(nchar(df[time_col][i, ]) == 4) {
-                df[time_col][i, ] <- as.character(df[time_col][i, ])
-            } else if(nchar(df[time_col][i, ]) > 4) {
-                print("ERROR: greater than 4 character entry in the time column")
-            }
-        } else if (dt_type == 'day'| dt_type == 'month') {
-            if(nchar(df[time_col][i, ]) == 1) {
-                df[time_col][i, ] <- paste0(0, df[time_col][i, ])
-            } else if(nchar(df[time_col][i, ]) == 2) {
-                df[time_col][i, ] <- as.character(df[time_col][i, ])
-            } else if(nchar(df[time_col][i, ]) > 2) {
-                print("ERROR: greater than 2 character entry in the month column")
-            }
-        } else if (dt_type == 'year' ) {
-            if(nchar(df[time_col][i, ]) == 1) {
-                df[time_col][i, ] <- paste0(200, df[time_col][i, ])
-            } else if(nchar(df[time_col][i, ]) == 2) {
-                df[time_col][i, ] <- paste0(20, df[time_col][i, ])
-            } else if(nchar(df[time_col][i, ]) == 3) {
-                df[time_col][i, ] <- paste0(2, df[time_col][i, ])
-            } else if(nchar(df[time_col][i, ]) == 4) {
-                df[time_col][i, ] <- as.character(df[time_col][i, ])
-            } else if(nchar(df[time_col][i, ]) > 4) {
-                print("ERROR: greater than 4 character entry in the year column")
-            }
-        } else {
-            print("ERROR: incorrect datetime type, options are 'time' 'day' 'month' 'year'")
-        }
+        }   
     }
     return(df)
 }
 
-here <- item_replace(d, 'RecTime', c("." = 1200))
+# here <- item_replace(d, 'RecTime', c("." = 1200))
 # here <- datetime_clean(d, 'RecTime', replace_value = ".")
 # here <- datetime_clean(d, 'RecDay', dt_type = 'day')
 
