@@ -63,7 +63,6 @@ item_replace <- function(df,
     }
     return(df)
 }
-#  arbitray addition
 datetime_clean <- function(df, 
                        # dictionary of form: c('datetime_column_name' = 'datetime_type')  'datetime_type' options: 'time' 'day' 'month' 'year'    
                        dt_dict, 
