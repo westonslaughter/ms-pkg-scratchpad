@@ -63,11 +63,11 @@ item_replace <- function(df,
     }
     return(df)
 }
-
+#  arbitray addition
 datetime_clean <- function(df, 
                        # dictionary of form: c('datetime_column_name' = 'datetime_type')  'datetime_type' options: 'time' 'day' 'month' 'year'    
                        dt_dict, 
-                       dt_defaults_dict = c('time' = 1200, 'day' = 00, 'month' = 00, 'year' = 2000),
+                       # dt_defaults_dict = c('time' = 1200, 'day' = 00, 'month' = 00, 'year' = 2000),
                        # allows you to skip NAs, 
                        # FALSE reassigns to default_dt
                        ignore_dt_na = TRUE, 
