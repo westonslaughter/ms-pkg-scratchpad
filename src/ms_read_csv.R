@@ -13,7 +13,7 @@ ms_vars <- read_csv('data/variables.csv')
 site_data <- read_csv('data/site_data.csv')
 source('src/helpers.R')
 
-#### Konza Stream Chemistry ####
+#### Konza Stream Chemistry Testing ####
 
 network <- 'lter'
 domain <- 'konza'
@@ -63,79 +63,101 @@ item_replace <- function(df,
     }
     return(df)
 }
-datetime_clean <- function(df, 
-                       # dictionary of form: c('datetime_column_name' = 'datetime_type')  'datetime_type' options: 'time' 'day' 'month' 'year'    
-                       dt_dict, 
-                       # dt_defaults_dict = c('time' = 1200, 'day' = 00, 'month' = 00, 'year' = 2000),
-                       # allows you to skip NAs, 
-                       # FALSE reassigns to default_dt
-                       ignore_dt_na = TRUE, 
-                       # allows user to specify other values to 
-                       # reassign to default_dt, can be single 
-                       # or vector
-                       replace_value = FALSE,
-                       ) {
+
+# dt_dict: dictionary of form: c('datetime_column_name' = 'datetime_type')  'datetime_type' options: 'time' 'day' 'month' 'year'    
+# ignore_dt-na: allows you to skip NAs, # FALSE reassigns to default_dt
+numbers_only <- function(x) !grepl("\\D", x)
+
+datetime_clean <- function(df,
+                           dt_dict, 
+                           ignore_dt_na = TRUE, 
+                           dt_defaults_dict = c('time' = 1200, 'day' = 00, 'month' = 00, 'year' = 2000)
+                           ) {
     # loop through every provided datetime_type
     for (time_col in names(dt_dict)) {
         # loop through every time value
         for(i in 1:nrow(df[time_col])) {
-            # if it is NA
-            if (is.na(df[time_col][i, ])) {
-                # pass if ignore_dt_na is TRUE
-                if (ignore_dt_na) {
-                    next()
-                    # replace with default time if FALSE
+            if (dt_dict[time_col] == 'time') {
+                # skip/change NAs
+                if(is.na(df[time_col][i, ])) {
+                    if(ignore_dt_na) {
+                        invisible()
+                    } else {
+                        df[time_col][i, ] <- dt_defaults_dict['time']                        
+                    }
+                # only perform time ops on numerics
+                } else if(numbers_only(df[time_col][i, ])){
+                    # make sure that all entries have 4 digits
+                    if(nchar(df[time_col][i, ]) == 1) {
+                        df[time_col][i, ] <- paste0(000, df[time_col][i, ])
+                    } else if(nchar(df[time_col][i, ]) == 2) {
+                        df[time_col][i, ] <- paste0(00, df[time_col][i, ])
+                    } else if(nchar(df[time_col][i, ]) == 3) {
+                        df[time_col][i, ] <- paste0(0, df[time_col][i, ])
+                    } else if(nchar(df[time_col][i, ]) == 4) {
+                        df[time_col][i, ] <- as.character(df[time_col][i, ])
+                    } else if(nchar(df[time_col][i, ]) > 4) {
+                        print("ERROR: greater than 4 character entry in the time column")
+                    }
                 } else {
-                    df[time_col][i, ] <- default_dt
-                }
-                # if it is equal to replace_value
-            } else if (df[time_col][i, ] %in% replace_value) {
-                # replace with the default
-                df[time_col][i, ] <- default_dt
-                # if the default time is midnight
-            } else if (dt_dict[time_col] == 'time') {
-                # make sure that all entries have 4 digits
-                if(nchar(df[time_col][i, ]) == 1) {
-                    df[time_col][i, ] <- paste0(000, df[time_col][i, ])
-                } else if(nchar(df[time_col][i, ]) == 2) {
-                    df[time_col][i, ] <- paste0(00, df[time_col][i, ])
-                } else if(nchar(df[time_col][i, ]) == 3) {
-                    df[time_col][i, ] <- paste0(0, df[time_col][i, ])
-                } else if(nchar(df[time_col][i, ]) == 4) {
-                    df[time_col][i, ] <- as.character(df[time_col][i, ])
-                } else if(nchar(df[time_col][i, ]) > 4) {
-                    print("ERROR: greater than 4 character entry in the time column")
+                    invisible()
                 }
             } else if (dt_dict[time_col] == 'day'| dt_dict[time_col] == 'month') {
-                if(nchar(df[time_col][i, ]) == 1) {
-                    df[time_col][i, ] <- paste0(0, df[time_col][i, ])
-                } else if(nchar(df[time_col][i, ]) == 2) {
-                    df[time_col][i, ] <- as.character(df[time_col][i, ])
-                } else if(nchar(df[time_col][i, ]) > 2) {
-                    print("ERROR: greater than 2 character entry in the month column")
+                # skip/change NAs
+                if(is.na(df[time_col][i, ])) {
+                    if(ignore_dt_na) {
+                        invisible()
+                    } else {
+                        if(dt_dict[time_col] == 'day'){
+                            df[time_col][i, ] <- dt_defaults_dict['day']  
+                        } else {
+                            df[time_col][i, ] <- dt_defaults_dict['month']  
+                        }
+                    }
+                    # only perform time ops on numerics
+                } else if(numbers_only(df[time_col][i, ])){
+                    if(nchar(df[time_col][i, ]) == 1) {
+                        df[time_col][i, ] <- paste0(0, df[time_col][i, ])
+                    } else if(nchar(df[time_col][i, ]) == 2) {
+                        df[time_col][i, ] <- as.character(df[time_col][i, ])
+                    } else if(nchar(df[time_col][i, ]) > 2) {
+                        print("ERROR: greater than 2 character entry in the month column")
+                    }
+                } else {
+                    invisible()
                 }
             } else if (dt_dict[time_col] == 'year' ) {
-                if(nchar(df[time_col][i, ]) == 1) {
-                    df[time_col][i, ] <- paste0(200, df[time_col][i, ])
-                } else if(nchar(df[time_col][i, ]) == 2) {
-                    df[time_col][i, ] <- paste0(20, df[time_col][i, ])
-                } else if(nchar(df[time_col][i, ]) == 3) {
-                    df[time_col][i, ] <- paste0(2, df[time_col][i, ])
-                } else if(nchar(df[time_col][i, ]) == 4) {
-                    df[time_col][i, ] <- as.character(df[time_col][i, ])
-                } else if(nchar(df[time_col][i, ]) > 4) {
-                    print("ERROR: greater than 4 character entry in the year column")
+                # skip/change NAs
+                if(is.na(df[time_col][i, ])) {
+                    if(ignore_dt_na) {
+                        invisible()
+                    } else {
+                        df[time_col][i, ] <- dt_defaults_dict['day']  
+                    }
+                    # only perform time ops on numerics
+                } else if(numbers_only(df[time_col][i, ])){
+                    if(nchar(df[time_col][i, ]) == 1) {
+                        df[time_col][i, ] <- paste0(200, df[time_col][i, ])
+                    } else if(nchar(df[time_col][i, ]) == 2) {
+                        df[time_col][i, ] <- paste0(20, df[time_col][i, ])
+                    } else if(nchar(df[time_col][i, ]) == 3) {
+                        df[time_col][i, ] <- paste0(2, df[time_col][i, ])
+                    } else if(nchar(df[time_col][i, ]) == 4) {
+                        df[time_col][i, ] <- as.character(df[time_col][i, ])
+                    } else if(nchar(df[time_col][i, ]) > 4) {
+                        print("ERROR: greater than 4 character entry in the year column")
+                    }
+                } else {
+                    invisible()
                 }
-            } else {
-                print("ERROR: incorrect datetime type, options are 'time' 'day' 'month' 'year'")
             }
         }   
     }
     return(df)
 }
 
-# here <- item_replace(d, 'RecTime', c("." = 1200))
-# here <- datetime_clean(d, 'RecTime', replace_value = ".")
+here <- item_replace(d, 'RecTime', c("." = NA))
+here <- datetime_clean(here, c('RecTime' = 'time'), ignore_dt_na = FALSE)
 # here <- datetime_clean(d, 'RecDay', dt_type = 'day')
 
 # 
