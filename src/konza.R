@@ -1,4 +1,4 @@
-#dia### Set up ####
+### Set up ####
 library(tidyverse)
 library(glue)
 library(lubridate)
@@ -11,8 +11,6 @@ site_data <- read_csv('data/site_data.csv')
 source('src/helpers.R')
 
 #### Knonza Stream Chemistry ####
-
-
 network <- 'lter'
 domain <- 'konza'
 prodname_ms <- 'stream_chemistry__50'
@@ -20,7 +18,6 @@ site_code <- 'sitename_NA'
 component <- 'NWC011'
 
 is_spatial <- FALSE
-
 
 rawfile1 = glue('data/{n}/{d}/raw/{p}/{s}/{c}.csv',
                 n = network,
@@ -33,18 +30,115 @@ d <- read.csv(rawfile1,
               colClasses = 'character',
               quote = '')
 
-d <- d %>%
-    as_tibble() %>%
-    mutate(RecTime = ifelse(RecTime == '.', 1200, RecTime)) %>%
-    mutate(num_t = nchar(RecTime)) %>%
-    mutate(num_d = nchar(RecDay)) %>%
-    mutate(time = case_when(num_t == 1 ~ paste0('010', RecTime),
-                            num_t == 2 ~ paste0('01', RecTime),
-                            num_t == 3 ~ paste0('0', RecTime),
-                            num_t == 4 ~ as.character(RecTime),
-                            is.na(num_t) ~ '1200')) %>%
-    mutate(day = ifelse(num_d == 1, paste0('0', as.character(RecDay)), as.character(RecDay))) %>%
-    select(-num_t, -RecTime, -num_d, -RecDay)
+d <- item_replace(d, 'RecTime', c("." = 1200), ignore_na = FALSE, na_replacer = 1200)
+
+datetime_clean <- function(df,
+                           dt_dict, 
+                           ignore_dt_na = TRUE, 
+                           dt_defaults_dict = c('time' = 1200, 'day' = 00, 'month' = 00, 'year' = 2000)
+) {
+    # loop through every provided datetime_type
+    for (time_col in names(dt_dict)) {
+        # loop through every time value
+        for(i in 1:nrow(df[time_col])) {
+            if (dt_dict[time_col] == 'time') {
+                # skip/change NAs
+                if(is.na(df[time_col][i, ])) {
+                    if(ignore_dt_na) {
+                        invisible()
+                    } else {
+                        df[time_col][i, ] <- dt_defaults_dict['time']                        
+                    }
+                    # only perform time ops on numerics
+                } else if(numbers_only(df[time_col][i, ])){
+                    # make sure that all entries have 4 digits
+                    if(nchar(df[time_col][i, ]) == 1) {
+                        df[time_col][i, ] <- paste0(000, df[time_col][i, ])
+                    } else if(nchar(df[time_col][i, ]) == 2) {
+                        df[time_col][i, ] <- paste0(00, df[time_col][i, ])
+                    } else if(nchar(df[time_col][i, ]) == 3) {
+                        df[time_col][i, ] <- paste0(0, df[time_col][i, ])
+                    } else if(nchar(df[time_col][i, ]) == 4) {
+                        df[time_col][i, ] <- as.character(df[time_col][i, ])
+                    } else if(nchar(df[time_col][i, ]) > 4) {
+                        print("ERROR: greater than 4 character entry in the time column")
+                    }
+                } else {
+                    invisible()
+                }
+            } else if (dt_dict[time_col] == 'day'| dt_dict[time_col] == 'month') {
+                # skip/change NAs
+                if(is.na(df[time_col][i, ])) {
+                    if(ignore_dt_na) {
+                        invisible()
+                    } else {
+                        if(dt_dict[time_col] == 'day'){
+                            df[time_col][i, ] <- dt_defaults_dict['day']  
+                        } else {
+                            df[time_col][i, ] <- dt_defaults_dict['month']  
+                        }
+                    }
+                    # only perform time ops on numerics
+                } else if(numbers_only(df[time_col][i, ])){
+                    if(nchar(df[time_col][i, ]) == 1) {
+                        df[time_col][i, ] <- paste0(0, df[time_col][i, ])
+                    } else if(nchar(df[time_col][i, ]) == 2) {
+                        df[time_col][i, ] <- as.character(df[time_col][i, ])
+                    } else if(nchar(df[time_col][i, ]) > 2) {
+                        print("ERROR: greater than 2 character entry in the month column")
+                    }
+                } else {
+                    invisible()
+                }
+            } else if (dt_dict[time_col] == 'year' ) {
+                # skip/change NAs
+                if(is.na(df[time_col][i, ])) {
+                    if(ignore_dt_na) {
+                        invisible()
+                    } else {
+                        df[time_col][i, ] <- dt_defaults_dict['day']  
+                    }
+                    # only perform time ops on numerics
+                } else if(numbers_only(df[time_col][i, ])){
+                    if(nchar(df[time_col][i, ]) == 1) {
+                        df[time_col][i, ] <- paste0(200, df[time_col][i, ])
+                    } else if(nchar(df[time_col][i, ]) == 2) {
+                        df[time_col][i, ] <- paste0(20, df[time_col][i, ])
+                    } else if(nchar(df[time_col][i, ]) == 3) {
+                        df[time_col][i, ] <- paste0(2, df[time_col][i, ])
+                    } else if(nchar(df[time_col][i, ]) == 4) {
+                        df[time_col][i, ] <- as.character(df[time_col][i, ])
+                    } else if(nchar(df[time_col][i, ]) > 4) {
+                        print("ERROR: greater than 4 character entry in the year column")
+                    }
+                } else {
+                    invisible()
+                }
+            }
+        }   
+    }
+    return(df)
+}
+
+numbers_only <- function(x) !grepl("\\D", x)
+d <- datetime_clean(d, c('RecTime' = 'time'), ignore_dt_na = FALSE)
+d <- datetime_clean(d, c('RecDay' = 'day'), ignore_dt_na = FALSE)
+d <- datetime_clean(d, c('RecMonth' = 'month'), ignore_dt_na = FALSE)
+
+
+
+# d <- d %>%
+#     as_tibble() %>%
+#     mutate(RecTime = ifelse(RecTime == '.', 1200, RecTime)) %>%
+#     mutate(num_t = nchar(RecTime)) %>%
+#     mutate(num_d = nchar(RecDay)) %>%
+#     mutate(time = case_when(num_t == 1 ~ paste0('010', RecTime),
+#                             num_t == 2 ~ paste0('01', RecTime),
+#                             num_t == 3 ~ paste0('0', RecTime),
+#                             num_t == 4 ~ as.character(RecTime),
+#                             is.na(num_t) ~ '1200')) %>%
+#     mutate(day = ifelse(num_d == 1, paste0('0', as.character(RecDay)), as.character(RecDay))) %>%
+#     select(-num_t, -RecTime, -num_d, -RecDay)
 
 # trawler for flagging good/bad
 TP_codes <- c('TP below Det limit', 'TP<Det limit', 'tp< det limit', 'TP below Det limit',
@@ -72,12 +166,12 @@ d <- d %>%
     ) %>%
     filter(WATERSHED %in% c('n04d', 'n02b', 'n20b', 'n01b', 'nfkc', 'hokn',
                             'sfkc', 'tube', 'kzfl', 'shan', 'hikx'))
-
-d <- ms_read_raw_csv(preprocessed_tibble = d,
+source('src/helpers.R')
+new_d <- ms_read_raw_csv(preprocessed_tibble = d,
                      datetime_cols = list('RecYear' = '%Y',
                                           'RecMonth' = '%m',
-                                          'day' = '%d',
-                                          'time' = '%H%M'),
+                                          'RecDay' = '%d',
+                                          'RecTime' = '%H%M'),
                      datetime_tz = 'US/Central',
                      site_code_col = 'WATERSHED',
                      alt_site_code = list('N04D' = 'n04d',
@@ -135,7 +229,7 @@ for(i in 1:length(sites)){
     
     write_ms_file(d = out_comp_filt,
                   network = network,
-                  domain = domain,
+                  domain = do main,
                   prodname_ms = prodname_ms,
                   site_code = filt_site,
                   level = 'munged',

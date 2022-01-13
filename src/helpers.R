@@ -1,6 +1,35 @@
 sm = suppressMessages
 sw = suppressWarnings
 
+item_replace <- function(df,
+                         rpl_cols,
+                         replace_dict,   
+                         ignore_na = TRUE,
+                         na_replacer = FALSE
+                         ) {
+    # loop through every time value
+    for (col in rpl_cols) {
+        for(i in 1:nrow(df[col])) {
+            # if it is NA
+            if (is.na(df[col][i, ])) {
+                # pass if ignore_na is TRUE
+                if (ignore_na) {
+                    next()
+                    # replace with default time if FALSE
+                } else {
+                    df[col][i, ] <- na_replacer
+                }
+                # if it is equal to replace_value
+            } else if (df[col][i, ] %in% names(replace_dict)) {
+                # replace with the default
+                df[col][i, ] <- replace_dict[df[col][i, ]]
+                # if the default time is midnight
+            }
+        }
+    }
+    return(df)
+}
+
 ms_read_raw_csv <- function(filepath,
                             preprocessed_tibble,
                             datetime_cols,
@@ -346,12 +375,12 @@ ms_read_raw_csv <- function(filepath,
                            datetime_formats = datetime_formats,
                            datetime_tz = datetime_tz,
                            optional = optionalize_nontoken_characters)
-    
+    browser()
     #remove rows with NA in datetime or site_code
     d <- filter(d,
                 across(any_of(c('datetime', 'site_code')),
                        ~ ! is.na(.x)))
-    
+    browser()
     #remove all-NA data columns and rows with NA in all data columns.
     #also remove flag columns for all-NA data columns.
     all_na_cols_bool <- apply(select(d, ends_with('__|dat')),
@@ -378,7 +407,7 @@ ms_read_raw_csv <- function(filepath,
         select(-NAsum) %>%
         distinct(datetime, site_code, .keep_all = TRUE) %>%
         arrange(site_code, datetime)
-    
+    browser()
     #convert NaNs to NAs, just in case.
     d[is.na(d)] <- NA
     
@@ -566,6 +595,8 @@ convert_unit <- function(x, input_unit, output_unit){
     return(new_val)
 }
 
+numbers_only <- function(x) !grepl("\\D", x)
+
 resolve_datetime <- function(d,
                              datetime_colnames,
                              datetime_formats,
@@ -588,12 +619,37 @@ resolve_datetime <- function(d,
     
     dt_tb <- tibble(basecol = rep(NA, nrow(d)))
     for(i in 1:length(datetime_colnames)){
-        
         dt_comps <- str_match_all(string = datetime_formats[i],
                                   pattern = '%([a-zA-Z])')[[1]][,2]
         dt_regex <- dt_format_to_regex(datetime_formats[i],
                                        optional = optional)
         
+        for(match in grepl("m|e|d|H|I|M|S", dt_comps)) {
+            print(dt_comps)
+            if(match){
+                for (dt_entry in 1:nrow(d[datetime_colnames[i]])) {
+                    if(! is.na(d[datetime_colnames[i]][dt_entry,])){
+                        if(numbers_only(d[datetime_colnames[i]][dt_entry,])){
+                            if(nchar(d[datetime_colnames[i]][dt_entry,]) < 2) {
+                                print('made it inside!')
+                                print(dt_comps)
+                                # print(d[datetime_colnames[i]][dt_entry,])
+                                d[datetime_colnames[i]][dt_entry,] <- paste0(0, d[datetime_colnames[i]][dt_entry,])
+                                # print(d[datetime_colnames[i]][dt_entry-1,])
+                                # print(d[datetime_colnames[i]][dt_entry,])
+                            } else if(nchar(d[datetime_colnames[i]][dt_entry,]) < 4){
+                                print('HM: made it inside!')
+                                print(dt_comps)
+                                # print(d[datetime_colnames[i]][dt_entry,])
+                                d[datetime_colnames[i]][dt_entry,] <- paste0(0, d[datetime_colnames[i]][dt_entry,])
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        # print(d)
+        # browser()
         dt_tb <- d %>%
             select(one_of(datetime_colnames[i])) %>%
             tidyr::extract(col = !!datetime_colnames[i],
@@ -604,13 +660,17 @@ resolve_datetime <- function(d,
             bind_cols(dt_tb)
     }
     
+    # browser() 
+    
     dt_tb$basecol = NULL
     
     #fill in defaults if applicable:
     #(12 for hour, 00 for minute and second, PM for AM/PM)
     dt_tb <- dt_tb %>%
         mutate(
+            # across(any_of(c('H', 'I')), ~ifelse(nchar(.x) < 2, paste0(0, .x), .x)),
             across(any_of(c('H', 'I')), ~ifelse(is.na(.x), '12', .x)),
+            # across(any_of(c('M', 'S')), ~ifelse(nchar(.x) < 2, paste0(0, .x), .x)),
             across(any_of(c('M', 'S')), ~ifelse(is.na(.x), '00', .x)),
             across(any_of('p'), ~ifelse(is.na(.x), 'PM', .x)))
     
@@ -638,7 +698,7 @@ resolve_datetime <- function(d,
     if('P' %in% colnames(dt_tb)){
         dt_tb$P[dt_tb$P == ''] <- 'AM'
     }
-    
+    # browser()
     dt_tb <- dt_tb %>%
         tidyr::unite(col = 'datetime',
                      everything(),
@@ -652,7 +712,7 @@ resolve_datetime <- function(d,
     
     d <- d %>%
         bind_cols(dt_tb) %>%
-        select(-one_of(datetime_colnames), datetime) %>%#in case 'datetime' is in datetime_colnames
+        select(-one_of(datetime_colnames), datetime) %>% #in case 'datetime' is in datetime_colnames
         relocate(datetime)
     
     return(d)
@@ -685,7 +745,7 @@ dt_format_to_regex <- function(fmt, optional){
                             h = '([a-zA-Z]+)?',
                             m = '([0-9]{1,2})?',
                             e = '([0-9]{1,2})?',
-                            d = '([0-9]{2})?',
+                            d = '([0-9]{1,2})?',
                             j = '([0-9]{3})?',
                             A = '([a-zA-Z]+)?',
                             a = '([a-zA-Z]+)?',
@@ -733,6 +793,84 @@ dt_format_to_regex <- function(fmt, optional){
     
     return(fmt)
 }
+
+
+dt_format_nchar <- function(fmt, optional){
+    
+    #fmt is a character vector of datetime formatting strings, such as
+    #   '%A, %Y-%m-%d %I:%M:%S %p' or '%j'. each element of fmt that is a
+    #   datetime token is replaced with a regex string that matches
+    #   what the token represents. For example, '%Y' matches a 4-digit
+    #   year and '[0-9]{4}' matches a 4-digit numeric sequence. non-token
+    #   characters (anything not following a %) are not modified. Note that
+    #   tokens B, b, h, A, and a are replaced by '[a-zA-Z]+', which matches
+    #   any sequence of one or more alphabetic characters of either case,
+    #   not just meaningful month/day names 'Weds' or 'january'. Also note
+    #   that these tokens are not currently accepted: g, G, n, t, c, r, R, T.
+    #optional is a vector of characters that should be made
+    #   optional in the exported regex (followed by a '?'). This is useful if
+    #   e.g. fmt is '%H:%M:%S' and elements to be matched may either appear in
+    #   HH:MM:SS or HH:MM format. making the ":" character optional here
+    #   (via optional = ':') allows the hour and minute data to be retained,
+    #   whereas the regex engine would otherwise expect two ":"s, find
+    #   only one, and return NA.
+    
+    dt_format_regex <- list(Y = 4,
+                            y = 2,
+                            # B = '([a-zA-Z]+)?',
+                            # b = '([a-zA-Z]+)?',
+                            # h = '([a-zA-Z]+)?',
+                            m = 2,
+                            e = 2,
+                            d = 2,
+                            j = 3,
+                            # A = '([a-zA-Z]+)?',
+                            # a = '([a-zA-Z]+)?',
+                            u = 1,
+                            w = 1,
+                            U = 2,
+                            W = 2,
+                            V = 2,
+                            C = 2,
+                            H = 2,
+                            I = 2,
+                            M = 2,
+                            S = 2,
+                            p = '([AP]M)?',
+                            z = 4,
+                            `F` = 8)
+    
+    for(i in 1:length(fmt)){
+        fmt_components <- str_match_all(string = fmt[i],
+                                        pattern = '%([a-zA-Z])')[[1]][,2]
+        
+        if(any(fmt_components %in% c('g', 'G', 'n', 't', 'c'))){
+            stop(paste('Tokens g, G, n, and t are not yet accepted.',
+                       'enhance dt_format_to_regex if you want to use them!'))
+        }
+        if(any(fmt_components %in% c('r', 'R', 'T'))){
+            stop('Tokens r, R, and T are not accepted. Use a different specification.')
+        }
+        
+        for(j in 1:length(fmt_components)){
+            component <- fmt_components[j]
+            fmt[i] <- sub(pattern = paste0('%', component),
+                          replacement = dt_format_regex[[component]],
+                          x = fmt[i])
+        }
+    }
+    
+    if(! missing(optional)){
+        for(o in optional){
+            fmt <- gsub(pattern = o,
+                        replacement = paste0(o, '?'),
+                        x = fmt)
+        }
+    }
+    
+    return(fmt)
+}
+
 
 escape_special_regex <- function(x){
     

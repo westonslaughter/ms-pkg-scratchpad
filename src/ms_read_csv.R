@@ -12,6 +12,27 @@ library(feather)
 ms_vars <- read_csv('data/variables.csv')
 site_data <- read_csv('data/site_data.csv')
 source('src/helpers.R')
+#### Hubbard Brook Stream Chemistry
+
+
+hnetwork <- 'lter'
+hdomain <- 'hbef'
+hprodname_ms <- 'stream_chemistry__208'
+hsite_code <- 'sitename_NA'
+hcomponent <- 'HubbardBrook_weekly_stream_chemistry_1963-2020'
+
+is_spatial <- FALSE
+
+rawfile <- glue('data/{n}/{d}/raw/{p}/{s}/{c}.csv',
+                n = hnetwork,
+                d = hdomain,
+                p = hprodname_ms,
+                s = hsite_code,
+                c = hcomponent)
+
+hbef_d <- read.csv(rawfile,
+              colClasses = 'character',
+              quote = '')
 
 #### Konza Stream Chemistry Testing ####
 
@@ -30,11 +51,11 @@ rawfile1 = glue('data/{n}/{d}/raw/{p}/{s}/{c}.csv',
                 s = site_code,
                 c = component)
 
-# should we incorporate this permanently into the f(x)?
 d <- read.csv(rawfile1,
               colClasses = 'character',
               quote = '')
 
+# ignore_na boolena shouldnt exist, should just be wther na_replacer exists or not essentially
 item_replace <- function(df,
                          rpl_cols,
                          replace_dict,   
@@ -161,18 +182,18 @@ here <- datetime_clean(here, c('RecTime' = 'time'), ignore_dt_na = FALSE)
 # here <- datetime_clean(d, 'RecDay', dt_type = 'day')
 
 # 
-# d <- d %>%
-#     as_tibble() %>%
-#     mutate(RecTime = ifelse(RecTime == '.', 1200, RecTime)) %>%
-#     mutate(num_t = nchar(RecTime)) %>%
-#     mutate(num_d = nchar(RecDay)) %>%
-#     mutate(time = case_when(num_t == 1 ~ paste0('010', RecTime),
-#                             num_t == 2 ~ paste0('01', RecTime),
-#                             num_t == 3 ~ paste0('0', RecTime),
-#                             num_t == 4 ~ as.character(RecTime),
-#                             is.na(num_t) ~ '1200')) %>%
-#     mutate(day = ifelse(num_d == 1, paste0('0', as.character(RecDay)), as.character(RecDay))) %>%
-#     select(-num_t, -RecTime, -num_d, -RecDay)
+d <- d %>%
+    as_tibble() %>%
+    mutate(RecTime = ifelse(RecTime == '.', 1200, RecTime)) %>%
+    mutate(num_t = nchar(RecTime)) %>%
+    mutate(num_d = nchar(RecDay)) %>%
+    mutate(time = case_when(num_t == 1 ~ paste0('010', RecTime),
+                            num_t == 2 ~ paste0('01', RecTime),
+                            num_t == 3 ~ paste0('0', RecTime),
+                            num_t == 4 ~ as.character(RecTime),
+                            is.na(num_t) ~ '1200')) %>%
+    mutate(day = ifelse(num_d == 1, paste0('0', as.character(RecDay)), as.character(RecDay))) %>%
+    select(-num_t, -RecTime, -num_d, -RecDay)
 
 # d_test_datetime_cols <- list('RecYear' = '%Y',
 #                            'RecMonth' = '%m',
@@ -187,6 +208,7 @@ NO3_codes <- c('No3 Below det limit', 'NO3 < det limit', 'NO3<det limit', 'no3 <
                'no3 below det limit', 'no3 and tp < det limit')
 NH4_codes <- c('NH4 <det limit', 'nh4<det limit')
 
+#  d version
 d_comments <- d$COMMENTS
 
 tp <- grepl(paste(TP_codes,collapse="|"), d_comments)
@@ -206,7 +228,22 @@ d <- d %>%
     ) %>%
     filter(WATERSHED %in% c('n04d', 'n02b', 'n20b', 'n01b', 'nfkc', 'hokn',
                             'sfkc', 'tube', 'kzfl', 'shan', 'hikx'))
-
+#  'here' version
+here_comments <- here$COMMENTS
+tp <- grepl(paste(TP_codes,collapse="|"), here_comments)
+no3 <-  grepl(paste(NO3_codes,collapse="|"), here_comments)
+nh4 <-  grepl(paste(NH4_codes,collapse="|"), here_comments)
+here <- here %>%
+    mutate(TP_code = tp,
+           NO3_code = no3,
+           NH4_code = nh4,
+           SRP_code = FALSE,
+           TN_code = FALSE,
+           DOC_code = FALSE,
+           check = 1
+    ) %>%
+    filter(WATERSHED %in% c('n04d', 'n02b', 'n20b', 'n01b', 'nfkc', 'hokn',
+                            'sfkc', 'tube', 'kzfl', 'shan', 'hikx'))
 
 ms_read_raw_csv <- function(filepath,
                             preprocessed_tibble,
@@ -476,7 +513,6 @@ ms_read_raw_csv <- function(filepath,
                            datetime_formats = datetime_formats,
                            datetime_tz = datetime_tz,
                            optional = optionalize_nontoken_characters)
-    
     # datetime character enforcement 
     
     #remove rows with NA in datetime or site_code
@@ -568,6 +604,32 @@ ms_read_raw_csv <- function(filepath,
 ms_d <- ms_read_raw_csv(preprocessed_tibble = d,
                      datetime_cols = list('RecYear' = '%Y',
                                           'RecMonth' = '%m',
+                                          'day' = '%d',
+                                          'time' = '%H%M'),
+                     datetime_tz = 'US/Central',
+                     site_code_col = 'WATERSHED',
+                     alt_site_code = list('N04D' = 'n04d',
+                                          'N02B' = 'n02b',
+                                          'N20B' = 'n20b',
+                                          'N01B' = 'n01b',
+                                          'NFKC' = 'nfkc',
+                                          'HOKN' = 'hokn',
+                                          'SFKC' = 'sfkc',
+                                          'TUBE' = 'tube',
+                                          'KZFL' = 'kzfl',
+                                          'SHAN' = 'shan',
+                                          'HIKX' = 'hikx'),
+                     data_cols =  c('NO3', 'NH4'='NH4_N', 'TN', 'SRP',
+                                    'TP', 'DOC'),
+                     data_col_pattern = '#V#',
+                     var_flagcol_pattern = '#V#_code',
+                     summary_flagcols = 'check',
+                     set_to_NA = '.',
+                     is_sensor = FALSE)
+# NEW TEST
+gah <- ms_read_raw_csv(preprocessed_tibble = here,
+                     datetime_cols = list('RecYear' = '%Y',
+                                          'RecMonth' = '%m',
                                           'RecDay' = '%d',
                                           'RecTime' = '%H%M'),
                      datetime_tz = 'US/Central',
@@ -589,13 +651,10 @@ ms_d <- ms_read_raw_csv(preprocessed_tibble = d,
                      var_flagcol_pattern = '#V#_code',
                      summary_flagcols = 'check',
                      set_to_NA = '.',
-                     rpl_cols = c('RecTime'),
-                     replace_dict = c("." = 1200),
                      is_sensor = FALSE)
-
 # comment for git test
 # HUbbard MSREAD
-d <- ms_read_csv(filepath = rawfile,
+hbef_d <- ms_read_raw_csv(filepath = rawfile,
                      datetime_cols = c(date = '%Y-%m-%d',
                                        timeEST = '%H:%M'),
                      datetime_tz = 'US/Eastern',
