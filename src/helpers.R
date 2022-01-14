@@ -375,12 +375,11 @@ ms_read_raw_csv <- function(filepath,
                            datetime_formats = datetime_formats,
                            datetime_tz = datetime_tz,
                            optional = optionalize_nontoken_characters)
-    browser()
+    
     #remove rows with NA in datetime or site_code
     d <- filter(d,
                 across(any_of(c('datetime', 'site_code')),
                        ~ ! is.na(.x)))
-    browser()
     #remove all-NA data columns and rows with NA in all data columns.
     #also remove flag columns for all-NA data columns.
     all_na_cols_bool <- apply(select(d, ends_with('__|dat')),
@@ -407,7 +406,7 @@ ms_read_raw_csv <- function(filepath,
         select(-NAsum) %>%
         distinct(datetime, site_code, .keep_all = TRUE) %>%
         arrange(site_code, datetime)
-    browser()
+    
     #convert NaNs to NAs, just in case.
     d[is.na(d)] <- NA
     
@@ -625,22 +624,13 @@ resolve_datetime <- function(d,
                                        optional = optional)
         
         for(match in grepl("m|e|d|H|I|M|S", dt_comps)) {
-            print(dt_comps)
             if(match){
                 for (dt_entry in 1:nrow(d[datetime_colnames[i]])) {
                     if(! is.na(d[datetime_colnames[i]][dt_entry,])){
                         if(numbers_only(d[datetime_colnames[i]][dt_entry,])){
-                            if(nchar(d[datetime_colnames[i]][dt_entry,]) < 2) {
-                                print('made it inside!')
-                                print(dt_comps)
-                                # print(d[datetime_colnames[i]][dt_entry,])
+                            if(nchar(d[datetime_colnames[i]][dt_entry,]) < 2 && nchar(d[datetime_colnames[i]][dt_entry,]) > 0) {
                                 d[datetime_colnames[i]][dt_entry,] <- paste0(0, d[datetime_colnames[i]][dt_entry,])
-                                # print(d[datetime_colnames[i]][dt_entry-1,])
-                                # print(d[datetime_colnames[i]][dt_entry,])
-                            } else if(nchar(d[datetime_colnames[i]][dt_entry,]) < 4){
-                                print('HM: made it inside!')
-                                print(dt_comps)
-                                # print(d[datetime_colnames[i]][dt_entry,])
+                            } else if(nchar(d[datetime_colnames[i]][dt_entry,]) < 4 && nchar(d[datetime_colnames[i]][dt_entry,]) > 2){
                                 d[datetime_colnames[i]][dt_entry,] <- paste0(0, d[datetime_colnames[i]][dt_entry,])
                             }
                         }
@@ -648,8 +638,6 @@ resolve_datetime <- function(d,
                 }
             }
         }
-        # print(d)
-        # browser()
         dt_tb <- d %>%
             select(one_of(datetime_colnames[i])) %>%
             tidyr::extract(col = !!datetime_colnames[i],
@@ -659,8 +647,6 @@ resolve_datetime <- function(d,
                            convert = FALSE) %>%
             bind_cols(dt_tb)
     }
-    
-    # browser() 
     
     dt_tb$basecol = NULL
     
@@ -698,7 +684,6 @@ resolve_datetime <- function(d,
     if('P' %in% colnames(dt_tb)){
         dt_tb$P[dt_tb$P == ''] <- 'AM'
     }
-    # browser()
     dt_tb <- dt_tb %>%
         tidyr::unite(col = 'datetime',
                      everything(),
@@ -709,7 +694,6 @@ resolve_datetime <- function(d,
                                                      collapse = ' '),
                                       tz = datetime_tz) %>%
                    with_tz(tz = 'UTC'))
-    
     d <- d %>%
         bind_cols(dt_tb) %>%
         select(-one_of(datetime_colnames), datetime) %>% #in case 'datetime' is in datetime_colnames
